@@ -5,7 +5,8 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from datetime import datetime
 
-TOKEN = "MTQ4MDc0MDI5ODgyODI4MzkwNA.Gzowr6.D076YKT5X070gI4u-J-exGv7z89C9kKLGKPv8I"
+import os
+TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN 시크릿이 설정되지 않았습니다.")
