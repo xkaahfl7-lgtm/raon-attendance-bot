@@ -388,8 +388,8 @@ async def on_ready():
 
     await update_status_message()
 
-    if not auto_status_update.is_running():
-        auto_status_update.start()
+    #if not auto_status_update.is_running():
+        #auto_status_update.start()
 
     await send_log("봇활성화")
 
