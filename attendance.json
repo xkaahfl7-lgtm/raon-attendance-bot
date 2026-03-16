@@ -1,17 +1,27 @@
 {
-  "DEVㆍ볶음": {
-    "total_seconds": 201600
+  "user1": {
+    "name": "DEVㆍ볶음",
+    "total": 201600,
+    "clock_in": null
   },
-  "IGㆍ봉식": {
-    "total_seconds": 94440
+  "user2": {
+    "name": "IGㆍ봉식",
+    "total": 94440,
+    "clock_in": null
   },
-  "AMㆍ우진": {
-    "total_seconds": 90720
+  "user3": {
+    "name": "AMㆍ우진",
+    "total": 90720,
+    "clock_in": null
   },
-  "STAFFㆍ⭐호랭": {
-    "total_seconds": 50400
+  "user4": {
+    "name": "STAFFㆍ⭐호랭",
+    "total": 50400,
+    "clock_in": null
   },
-  "STAFFㆍ⭐백구": {
-    "total_seconds": 43200
+  "user5": {
+    "name": "STAFFㆍ⭐백구",
+    "total": 43200,
+    "clock_in": null
   }
 }
