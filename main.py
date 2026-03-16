@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 # =========================
 # 기본 설정
 # =========================
-TOKEN = "여기에_봇_토큰"
+import os
+TOKEN = os.getenv("TOKEN")
 
 GUILD_ID = 1462457099039674498
 
