@@ -1,58 +1,155 @@
-import os
-import json
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime
-
+import json
 import os
-TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN 시크릿이 설정되지 않았습니다.")
+# =========================
+# 기본 설정
+# =========================
+TOKEN = "여기에_봇_토큰"
 
 GUILD_ID = 1462457099039674498
 
-BUTTON_CHANNEL_ID = 1481808025030492180  # 출퇴근버튼
-RECORD_CHANNEL_ID = 1479035911726563419  # 출퇴근ㅣ기록
-STATUS_CHANNEL_ID = 1479036025820156035  # 관리자 근무확인
-LOG_CHANNEL_ID = 1479382504204013568  # 봇로그 (지금 우진님이 보낸 값 그대로 넣음)
+# 버튼을 올릴 채널
+BUTTON_CHANNEL_ID = 1481808025030492180
 
-DATA_FILE = "attendance.json"
+# 출퇴근 기록 남길 채널
+RECORD_CHANNEL_ID = 1479035911726563419
+
+# 관리자 근무현황 임베드 채널
+STATUS_CHANNEL_ID = 1479036025820156035
+
+# 봇 로그 채널
+LOG_CHANNEL_ID = 1479382504204013568
+
+DATA_FILE = "attendance_data.json"
+KST = ZoneInfo("Asia/Seoul")
 
 intents = discord.Intents.default()
-intents.members = True
 intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
+# 현황 메시지 ID 저장용
+status_message_id = None
 
+
+# =========================
+# 데이터 입출력
+# =========================
 def load_data():
     if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f, ensure_ascii=False, indent=4)
+        return {
+            "users": {},
+            "status_message_id": None
+        }
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except:
-            return {}
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "users" not in data:
+            data["users"] = {}
+        if "status_message_id" not in data:
+            data["status_message_id"] = None
+
+        # 혹시 예전 꼬인 데이터 정리
+        if not isinstance(data["users"], dict):
+            data["users"] = {}
+
+        cleaned_users = {}
+        for user_id, info in data["users"].items():
+            if not str(user_id).isdigit():
+                continue
+            if not isinstance(info, dict):
+                continue
+
+            cleaned_users[str(user_id)] = {
+                "name": str(info.get("name", "알 수 없음")),
+                "total_seconds": int(info.get("total_seconds", 0)),
+                "is_working": bool(info.get("is_working", False)),
+                "start_time": info.get("start_time", None)
+            }
+
+        data["users"] = cleaned_users
+        return data
+
+    except Exception:
+        return {
+            "users": {},
+            "status_message_id": None
+        }
 
 
 def save_data():
+    global db
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(attendance, f, ensure_ascii=False, indent=4)
+        json.dump(db, f, ensure_ascii=False, indent=4)
 
 
-attendance = load_data()
+db = load_data()
+status_message_id = db.get("status_message_id")
 
 
-def format_time(seconds: int):
-    seconds = int(seconds)
+# =========================
+# 공용 함수
+# =========================
+def now_kst():
+    return datetime.now(KST)
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def format_seconds(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
     h = seconds // 3600
     m = (seconds % 3600) // 60
     return f"{h}시간 {m}분"
+
+
+def get_user_record(member: discord.Member):
+    user_id = str(member.id)
+
+    if user_id not in db["users"]:
+        db["users"][user_id] = {
+            "name": member.display_name,
+            "total_seconds": 0,
+            "is_working": False,
+            "start_time": None
+        }
+    else:
+        # 이름은 항상 최신 표시명으로 갱신
+        db["users"][user_id]["name"] = member.display_name
+
+        # 키 누락 방지
+        db["users"][user_id].setdefault("total_seconds", 0)
+        db["users"][user_id].setdefault("is_working", False)
+        db["users"][user_id].setdefault("start_time", None)
+
+    return db["users"][user_id]
+
+
+def get_live_total_seconds(user_info: dict) -> int:
+    total = int(user_info.get("total_seconds", 0))
+
+    if user_info.get("is_working") and user_info.get("start_time"):
+        try:
+            started = datetime.fromisoformat(user_info["start_time"])
+            elapsed = int((now_utc() - started).total_seconds())
+            if elapsed > 0:
+                total += elapsed
+        except Exception:
+            pass
+
+    return total
 
 
 async def send_log(message: str):
@@ -60,355 +157,333 @@ async def send_log(message: str):
     if channel:
         try:
             await channel.send(message)
-        except Exception as e:
-            print(f"로그 전송 실패: {e}")
+        except Exception:
+            pass
+
+
+async def send_record(message: str):
+    channel = bot.get_channel(RECORD_CHANNEL_ID)
+    if channel:
+        try:
+            await channel.send(message)
+        except Exception:
+            pass
+
+
+def build_status_embed(guild: discord.Guild):
+    current_workers = []
+    ranking = []
+    all_totals = []
+
+    for user_id, info in db["users"].items():
+        total_live = get_live_total_seconds(info)
+        all_totals.append((user_id, info["name"], total_live, info.get("is_working", False)))
+
+        if info.get("is_working"):
+            current_workers.append(info["name"])
+
+    ranking = sorted(all_totals, key=lambda x: x[2], reverse=True)
+
+    embed = discord.Embed(
+        title="📊 관리자 근무현황",
+        color=discord.Color.light_grey()
+    )
+
+    # 현재 근무중
+    if current_workers:
+        current_text = "\n".join([f"• {name}" for name in current_workers])
+    else:
+        current_text = "현재 근무중인 관리자가 없습니다."
+    embed.add_field(name="🟢 현재 근무중", value=current_text, inline=False)
+
+    # 근무 랭킹
+    if ranking:
+        rank_lines = []
+        for idx, (_, name, total_sec, _) in enumerate(ranking[:10], start=1):
+            medal = "🏆" if idx == 1 else ""
+            rank_lines.append(f"{idx}위 {name} - {format_seconds(total_sec)} {medal}".rstrip())
+        rank_text = "\n".join(rank_lines)
+    else:
+        rank_text = "기록 없음"
+    embed.add_field(name="🏆 근무 랭킹", value=rank_text, inline=False)
+
+    # 누적근무시간
+    if ranking:
+        total_lines = []
+        for _, name, total_sec, _ in ranking[:10]:
+            total_lines.append(f"{name} - {format_seconds(total_sec)}")
+        total_text = "\n".join(total_lines)
+    else:
+        total_text = "기록 없음"
+    embed.add_field(name="⏰ 누적근무시간", value=total_text, inline=False)
+
+    embed.set_footer(text=f"업데이트 시간: {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
+    return embed
 
 
 async def update_status_message():
-    channel = bot.get_channel(STATUS_CHANNEL_ID)
-    if not channel:
+    global status_message_id
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
         return
 
-    working_list = []
-    ranking_list = []
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    if channel is None:
+        return
 
-    now = datetime.now()
-
-    for uid, data in attendance.items():
-        nickname = data.get("name", f"알수없음({uid})")
-        total = int(data.get("total", 0))
-
-        if data.get("clock_in"):
-            try:
-                start = datetime.fromisoformat(data["clock_in"])
-                running = int((now - start).total_seconds())
-                total += running
-                working_list.append(nickname)
-            except:
-                pass
-
-        ranking_list.append((nickname, total))
-
-    ranking_list.sort(key=lambda x: x[1], reverse=True)
-
-    working_text = (
-        "\n".join([f"• {name}" for name in working_list])
-        if working_list
-        else "현재 근무중인 관리자 없음"
-    )
-
-    ranking_text = ""
-    for i, (name, sec) in enumerate(ranking_list[:10], start=1):
-        ranking_text += f"{i}위 {name} - {format_time(sec)}\n"
-    if not ranking_text:
-        ranking_text = "기록 없음"
-
-    total_text = ""
-    for name, sec in ranking_list:
-        total_text += f"{name} - {format_time(sec)}\n"
-    if not total_text:
-        total_text = "기록 없음"
-
-    embed = discord.Embed(title="📊 관리자 근무현황", color=0x2F3136)
-    embed.add_field(name="🟢 현재 근무중", value=working_text, inline=False)
-    embed.add_field(name="🏆 근무 랭킹", value=ranking_text, inline=False)
-    embed.add_field(name="⏰ 누적 근무시간", value=total_text, inline=False)
-    embed.set_footer(text=f"업데이트 시간: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    embed = build_status_embed(guild)
 
     try:
-        async for msg in channel.history(limit=20):
-            if msg.author == bot.user:
-                try:
-                    await msg.delete()
-                except:
-                    pass
-        await channel.send(embed=embed)
+        if status_message_id:
+            try:
+                msg = await channel.fetch_message(status_message_id)
+                await msg.edit(embed=embed)
+                return
+            except discord.NotFound:
+                status_message_id = None
+            except Exception:
+                status_message_id = None
+
+        msg = await channel.send(embed=embed)
+        status_message_id = msg.id
+        db["status_message_id"] = msg.id
+        save_data()
+
     except Exception as e:
-        print(f"현황판 업데이트 실패: {e}")
-        await send_log(f"오류 | 현황판 업데이트 실패 | {e}")
+        await send_log(f"❌ 현황 메시지 업데이트 실패: {e}")
 
 
+# =========================
+# 출근 / 퇴근 처리
+# =========================
+async def do_clock_in(member: discord.Member):
+    user = get_user_record(member)
+
+    if user["is_working"]:
+        return False, "이미 출근 상태입니다."
+
+    user["name"] = member.display_name
+    user["is_working"] = True
+    user["start_time"] = now_utc().isoformat()
+
+    save_data()
+    await update_status_message()
+
+    await send_record(
+        f"🟢 출근 | {member.mention} ({member.display_name}) | {now_kst().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await send_log(f"✅ 출근 처리 완료: {member.display_name}")
+
+    return True, "출근 처리되었습니다."
+
+
+async def do_clock_out(member: discord.Member):
+    user = get_user_record(member)
+
+    if not user["is_working"]:
+        return False, "출근한 기록이 없습니다."
+
+    added_seconds = 0
+
+    if user["start_time"]:
+        try:
+            started = datetime.fromisoformat(user["start_time"])
+            added_seconds = int((now_utc() - started).total_seconds())
+            if added_seconds < 0:
+                added_seconds = 0
+        except Exception:
+            added_seconds = 0
+
+    user["total_seconds"] += added_seconds
+    user["is_working"] = False
+    user["start_time"] = None
+    user["name"] = member.display_name
+
+    save_data()
+    await update_status_message()
+
+    await send_record(
+        f"🔴 퇴근 | {member.mention} ({member.display_name}) | "
+        f"이번 근무: {format_seconds(added_seconds)} | "
+        f"누적: {format_seconds(user['total_seconds'])} | "
+        f"{now_kst().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await send_log(f"✅ 퇴근 처리 완료: {member.display_name} / 이번근무 {format_seconds(added_seconds)}")
+
+    return True, f"퇴근 처리되었습니다.\n이번 근무: {format_seconds(added_seconds)}\n누적: {format_seconds(user['total_seconds'])}"
+
+
+# =========================
+# 버튼 뷰
+# =========================
 class AttendanceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="출근",
-        style=discord.ButtonStyle.green,
-        emoji="🟢",
-        custom_id="attendance_clock_in",
-    )
-    async def clock_in_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        uid = str(interaction.user.id)
-        nickname = interaction.user.display_name
+    @discord.ui.button(label="출근", style=discord.ButtonStyle.success, custom_id="attendance_clock_in")
+    async def clock_in_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = await do_clock_in(interaction.user)
+        if success:
+            await interaction.response.send_message(f"✅ {msg}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ {msg}", ephemeral=True)
 
-        if uid not in attendance:
-            attendance[uid] = {"name": nickname, "total": 0, "clock_in": None}
+    @discord.ui.button(label="퇴근", style=discord.ButtonStyle.danger, custom_id="attendance_clock_out")
+    async def clock_out_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = await do_clock_out(interaction.user)
+        if success:
+            await interaction.response.send_message(f"✅ {msg}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ {msg}", ephemeral=True)
 
-        attendance[uid]["name"] = nickname
-
-        if attendance[uid]["clock_in"] is not None:
-            await interaction.response.send_message(
-                "이미 출근 상태입니다.", ephemeral=True
-            )
-            return
-
-        now = datetime.now()
-        attendance[uid]["clock_in"] = now.isoformat()
-        save_data()
-
-        record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-        if record_channel:
-            embed = discord.Embed(color=0x57F287)
-            embed.title = "🟢 출근"
-            embed.add_field(name="관리자", value=interaction.user.mention, inline=False)
-            embed.add_field(
-                name="시간", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False
-            )
-            await record_channel.send(embed=embed)
-
-        await send_log(f"출근완료 | {nickname}")
+    @discord.ui.button(label="현황갱신", style=discord.ButtonStyle.primary, custom_id="attendance_refresh")
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await update_status_message()
-        await interaction.response.send_message("출근 완료", ephemeral=True)
+        await interaction.response.send_message("🔄 근무현황을 갱신했습니다.", ephemeral=True)
 
-    @discord.ui.button(
-        label="퇴근",
-        style=discord.ButtonStyle.red,
-        emoji="🔴",
-        custom_id="attendance_clock_out",
+
+# =========================
+# 슬래시 명령어
+# =========================
+@tree.command(name="출근", description="출근 처리")
+async def slash_clock_in(interaction: discord.Interaction):
+    success, msg = await do_clock_in(interaction.user)
+    if success:
+        await interaction.response.send_message(f"✅ {msg}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ {msg}", ephemeral=True)
+
+
+@tree.command(name="퇴근", description="퇴근 처리")
+async def slash_clock_out(interaction: discord.Interaction):
+    success, msg = await do_clock_out(interaction.user)
+    if success:
+        await interaction.response.send_message(f"✅ {msg}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ {msg}", ephemeral=True)
+
+
+@tree.command(name="현황갱신", description="관리자 근무현황 갱신")
+async def slash_refresh(interaction: discord.Interaction):
+    await update_status_message()
+    await interaction.response.send_message("🔄 근무현황을 갱신했습니다.", ephemeral=True)
+
+
+@tree.command(name="근무패널", description="출근/퇴근 버튼 패널 생성")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="RAON 출퇴근 봇",
+        description="아래 버튼으로 출근 / 퇴근 / 현황갱신을 사용할 수 있습니다.",
+        color=discord.Color.blue()
     )
-    async def clock_out_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        uid = str(interaction.user.id)
-        nickname = interaction.user.display_name
+    await interaction.channel.send(embed=embed, view=AttendanceView())
+    await interaction.response.send_message("✅ 근무 패널을 생성했습니다.", ephemeral=True)
 
-        if uid not in attendance or attendance[uid].get("clock_in") is None:
-            await interaction.response.send_message(
-                "출근 기록이 없습니다.", ephemeral=True
-            )
-            return
 
-        now = datetime.now()
-
-        try:
-            start = datetime.fromisoformat(attendance[uid]["clock_in"])
-            diff = int((now - start).total_seconds())
-        except Exception as e:
-            await send_log(f"오류 | 퇴근 처리 실패 | {nickname} | {e}")
-            await interaction.response.send_message(
-                "퇴근 처리 중 오류가 발생했습니다.", ephemeral=True
-            )
-            return
-
-        attendance[uid]["name"] = nickname
-        attendance[uid]["total"] = int(attendance[uid].get("total", 0)) + diff
-        attendance[uid]["clock_in"] = None
+@tree.command(name="근무초기화", description="퇴사자/테스트 계정 정리용 수동 삭제")
+@app_commands.describe(유저="삭제할 유저")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_reset_user(interaction: discord.Interaction, 유저: discord.Member):
+    user_id = str(유저.id)
+    if user_id in db["users"]:
+        del db["users"][user_id]
         save_data()
-
-        record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-        if record_channel:
-            embed = discord.Embed(color=0xED4245)
-            embed.title = "🔴 퇴근"
-            embed.add_field(name="관리자", value=interaction.user.mention, inline=False)
-            embed.add_field(
-                name="시간", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False
-            )
-            embed.add_field(name="근무시간", value=format_time(diff), inline=False)
-            await record_channel.send(embed=embed)
-
-        await send_log(f"퇴근완료 | {nickname}")
         await update_status_message()
-        await interaction.response.send_message("퇴근 완료", ephemeral=True)
+        await interaction.response.send_message(f"🗑️ {유저.display_name} 데이터를 삭제했습니다.", ephemeral=True)
+        await send_log(f"🗑️ 관리자 데이터 삭제: {유저.display_name}")
+    else:
+        await interaction.response.send_message("해당 유저 데이터가 없습니다.", ephemeral=True)
 
 
-@tree.command(name="강제퇴근", description="관리자가 유저를 강제로 퇴근 처리합니다")
-@app_commands.checks.has_permissions(manage_messages=True)
-@app_commands.describe(member="강제 퇴근 처리할 관리자")
-async def force_clock_out(interaction: discord.Interaction, member: discord.Member):
-    uid = str(member.id)
-    nickname = member.display_name
-
-    if uid not in attendance or attendance[uid].get("clock_in") is None:
-        await interaction.response.send_message(
-            "해당 유저는 현재 출근 상태가 아닙니다.", ephemeral=True
-        )
+@tree.command(name="근무정리", description="현재 서버에 없는 유저 데이터 정리")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_cleanup(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("서버에서만 사용 가능합니다.", ephemeral=True)
         return
 
-    now = datetime.now()
+    remove_ids = []
+    for user_id in db["users"].keys():
+        member = guild.get_member(int(user_id))
+        if member is None:
+            remove_ids.append(user_id)
 
-    try:
-        start = datetime.fromisoformat(attendance[uid]["clock_in"])
-        diff = int((now - start).total_seconds())
-    except Exception as e:
-        await send_log(f"오류 | 강제퇴근 실패 | {nickname} | {e}")
-        await interaction.response.send_message(
-            "강제퇴근 처리 중 오류가 발생했습니다.", ephemeral=True
-        )
-        return
+    for user_id in remove_ids:
+        del db["users"][user_id]
 
-    attendance[uid]["name"] = nickname
-    attendance[uid]["total"] = int(attendance[uid].get("total", 0)) + diff
-    attendance[uid]["clock_in"] = None
     save_data()
-
-    record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-    if record_channel:
-        embed = discord.Embed(color=0xFAA61A)
-        embed.title = "⚠️ 강제 퇴근"
-        embed.add_field(name="관리자", value=member.mention, inline=False)
-        embed.add_field(name="처리자", value=interaction.user.mention, inline=False)
-        embed.add_field(
-            name="시간", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False
-        )
-        embed.add_field(name="추가된 근무시간", value=format_time(diff), inline=False)
-        await record_channel.send(embed=embed)
-
-    await send_log(
-        f"강제퇴근 | 대상:{nickname} | 처리자:{interaction.user.display_name}"
-    )
     await update_status_message()
+
     await interaction.response.send_message(
-        f"{member.mention} 강제 퇴근 처리 완료", ephemeral=True
+        f"🧹 서버에 없는 유저 데이터 {len(remove_ids)}개를 정리했습니다.",
+        ephemeral=True
     )
+    await send_log(f"🧹 근무 데이터 정리 완료: {len(remove_ids)}개 삭제")
 
 
-@tree.command(name="근무시간추가", description="관리자가 유저 근무시간을 추가합니다")
-@app_commands.checks.has_permissions(manage_messages=True)
-@app_commands.describe(member="시간을 추가할 관리자", hours="추가할 시간")
-async def add_work_time(
-    interaction: discord.Interaction, member: discord.Member, hours: int
-):
-    if hours <= 0:
-        await interaction.response.send_message(
-            "1 이상의 숫자를 입력해주세요.", ephemeral=True
-        )
-        return
-
-    uid = str(member.id)
-    nickname = member.display_name
-
-    if uid not in attendance:
-        attendance[uid] = {"name": nickname, "total": 0, "clock_in": None}
-
-    attendance[uid]["name"] = nickname
-    attendance[uid]["total"] = int(attendance[uid].get("total", 0)) + (hours * 3600)
-    save_data()
-
-    await send_log(
-        f"근무시간추가 | {nickname} | {hours}시간 | 처리자:{interaction.user.display_name}"
-    )
-    await update_status_message()
-    await interaction.response.send_message(
-        f"{member.mention} 근무시간 {hours}시간 추가 완료", ephemeral=True
-    )
+# =========================
+# 에러 처리
+# =========================
+@slash_panel.error
+@slash_reset_user.error
+@slash_cleanup.error
+async def admin_command_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        if not interaction.response.is_done():
+            await interaction.response.send_message("이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
+    else:
+        if not interaction.response.is_done():
+            await interaction.response.send_message("명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
+        await send_log(f"❌ 명령어 오류: {error}")
 
 
-@tree.command(name="근무시간차감", description="관리자가 유저 근무시간을 차감합니다")
-@app_commands.checks.has_permissions(manage_messages=True)
-@app_commands.describe(member="시간을 차감할 관리자", hours="차감할 시간")
-async def subtract_work_time(
-    interaction: discord.Interaction, member: discord.Member, hours: int
-):
-    if hours <= 0:
-        await interaction.response.send_message(
-            "1 이상의 숫자를 입력해주세요.", ephemeral=True
-        )
-        return
-
-    uid = str(member.id)
-    nickname = member.display_name
-
-    if uid not in attendance:
-        await interaction.response.send_message(
-            "해당 유저의 근무 기록이 없습니다.", ephemeral=True
-        )
-        return
-
-    current_total = int(attendance[uid].get("total", 0))
-    new_total = current_total - (hours * 3600)
-    if new_total < 0:
-        new_total = 0
-
-    attendance[uid]["name"] = nickname
-    attendance[uid]["total"] = new_total
-    save_data()
-
-    await send_log(
-        f"근무시간차감 | {nickname} | {hours}시간 | 처리자:{interaction.user.display_name}"
-    )
-    await update_status_message()
-    await interaction.response.send_message(
-        f"{member.mention} 근무시간 {hours}시간 차감 완료", ephemeral=True
-    )
-
-
+# =========================
+# 주기적 현황 갱신
+# =========================
 @tasks.loop(minutes=1)
-async def auto_status_update():
+async def auto_update_status():
     await update_status_message()
 
 
+# =========================
+# 이벤트
+# =========================
 @bot.event
 async def on_ready():
-    print(f"로그인 완료 | {bot.user}")
+    global status_message_id
 
     bot.add_view(AttendanceView())
 
     try:
         guild = discord.Object(id=GUILD_ID)
+        tree.copy_global_to(guild=guild)
         synced = await tree.sync(guild=guild)
         print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
     except Exception as e:
         print(f"슬래시 명령어 동기화 실패: {e}")
-        await send_log(f"오류 | 슬래시 명령어 동기화 실패 | {e}")
 
-    button_channel = bot.get_channel(BUTTON_CHANNEL_ID)
-    if button_channel:
-        try:
-            async for msg in button_channel.history(limit=20):
-                if msg.author == bot.user:
-                    try:
-                        await msg.delete()
-                    except:
-                        pass
-        except Exception as e:
-            await send_log(f"오류 | 버튼채널 정리 실패 | {e}")
+    status_message_id = db.get("status_message_id")
 
-        embed = discord.Embed(
-            title="관리자 출퇴근",
-            description="버튼을 눌러 출근 / 퇴근을 기록하세요.",
-            color=0x5865F2,
-        )
-        try:
-            await button_channel.send(embed=embed, view=AttendanceView())
-        except Exception as e:
-            await send_log(f"오류 | 버튼 생성 실패 | {e}")
+    if not auto_update_status.is_running():
+        auto_update_status.start()
 
     await update_status_message()
-
-    #if not auto_status_update.is_running():
-        #auto_status_update.start()
-
-    await send_log("봇활성화")
+    await send_log("🤖 RAON 출퇴근 봇이 정상적으로 실행되었습니다.")
+    print(f"Logged in as {bot.user}")
 
 
-@force_clock_out.error
-@add_work_time.error
-@subtract_work_time.error
-async def admin_command_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-    else:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"오류가 발생했습니다: {error}", ephemeral=True
-            )
-        await send_log(f"오류 | 관리자 명령어 실패 | {error}")
+@bot.event
+async def on_member_remove(member: discord.Member):
+    # 서버에서 나간 사람 데이터 자동 정리
+    user_id = str(member.id)
+    if user_id in db["users"]:
+        del db["users"][user_id]
+        save_data()
+        await update_status_message()
+        await send_log(f"🧹 서버 퇴장 유저 데이터 자동 삭제: {member.display_name}")
 
 
 bot.run(TOKEN)
