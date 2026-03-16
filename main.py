@@ -12,11 +12,11 @@ from zoneinfo import ZoneInfo
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    raise ValueError("환경변수 TOKEN이 비어 있습니다. Render > Environment에 TOKEN을 추가하세요.")
+    raise ValueError("TOKEN 변수가 비어 있습니다. Railway > Variables 에 TOKEN을 추가하세요.")
 
 GUILD_ID = 1462457099039674498
 
-# 버튼 패널 올릴 채널
+# 버튼 패널 채널
 BUTTON_CHANNEL_ID = 1481808025030492180
 
 # 출퇴근 기록 채널
@@ -44,16 +44,28 @@ tree = bot.tree
 # =========================
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"users": {}, "status_message_id": None, "panel_message_id": None}
+        return {
+            "users": {},
+            "status_message_id": None,
+            "panel_message_id": None
+        }
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return {"users": {}, "status_message_id": None, "panel_message_id": None}
+        return {
+            "users": {},
+            "status_message_id": None,
+            "panel_message_id": None
+        }
 
     if not isinstance(data, dict):
-        return {"users": {}, "status_message_id": None, "panel_message_id": None}
+        return {
+            "users": {},
+            "status_message_id": None,
+            "panel_message_id": None
+        }
 
     users = data.get("users", {})
     if not isinstance(users, dict):
@@ -114,7 +126,7 @@ def parse_iso_datetime(value: str):
 
 
 # =========================
-# 유저 데이터
+# 유저 데이터 처리
 # =========================
 def get_user_record(member: discord.Member):
     user_id = str(member.id)
@@ -149,7 +161,7 @@ def get_live_total_seconds(user_info: dict) -> int:
 
 
 # =========================
-# 채널 전송
+# 채널 메시지 전송
 # =========================
 async def send_log(message: str):
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -190,14 +202,12 @@ def build_status_embed(guild: discord.Guild):
         color=discord.Color.light_grey()
     )
 
-    # 현재 근무중
     if current_workers:
         current_text = "\n".join([f"• {name}" for name in current_workers])
     else:
         current_text = "현재 근무중인 관리자가 없습니다."
     embed.add_field(name="🟢 현재 근무중", value=current_text, inline=False)
 
-    # 근무 랭킹
     if ranking_data:
         rank_lines = []
         for idx, (_, name, total_sec, _) in enumerate(ranking_data[:10], start=1):
@@ -208,7 +218,6 @@ def build_status_embed(guild: discord.Guild):
         rank_text = "기록 없음"
     embed.add_field(name="🏆 근무 랭킹", value=rank_text, inline=False)
 
-    # 누적근무시간
     if ranking_data:
         total_lines = []
         for _, name, total_sec, _ in ranking_data[:10]:
@@ -250,7 +259,7 @@ async def update_status_message():
 
 
 # =========================
-# 출근 / 퇴근
+# 출근 / 퇴근 처리
 # =========================
 async def do_clock_in(member: discord.Member):
     user = get_user_record(member)
