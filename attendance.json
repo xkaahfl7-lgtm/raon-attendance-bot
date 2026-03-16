@@ -1,22 +1,17 @@
 {
-  "bokkum": {
-    "name": "DEVㆍ볶음",
+  "DEVㆍ볶음": {
     "total_seconds": 201600
   },
-  "bongsik": {
-    "name": "IGㆍ봉식",
+  "IGㆍ봉식": {
     "total_seconds": 94440
   },
-  "woojin": {
-    "name": "AMㆍ우진",
+  "AMㆍ우진": {
     "total_seconds": 90720
   },
-  "horang": {
-    "name": "STAFFㆍ⭐호랭",
+  "STAFFㆍ⭐호랭": {
     "total_seconds": 50400
   },
-  "baekgu": {
-    "name": "STAFFㆍ⭐백구",
+  "STAFFㆍ⭐백구": {
     "total_seconds": 43200
   }
 }
