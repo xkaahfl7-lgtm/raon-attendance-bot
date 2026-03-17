@@ -42,7 +42,7 @@ def now_str():
 def safe_int(v):
     try:
         return int(v)
-    except:
+    except Exception:
         return 0
 
 
@@ -58,27 +58,20 @@ def normalize_person_key(name: str) -> str:
         return ""
 
     text = unicodedata.normalize("NFKC", str(name)).strip()
-    text = re.sub(r'[\u200b-\u200d\ufeff]', '', text)
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
     text = text.replace("(", "").replace(")", "")
     text = text.replace("⭐", "")
     text = text.lower()
 
-    # 맨 앞 직급 제거
     text = re.sub(
-        r'^(gm|dgm|am|im|ig|st|staff|dev|admin|mod)[\s\-_ㆍ·|/\\]*',
-        '',
+        r"^(gm|dgm|am|im|ig|st|staff|dev|admin|mod)[\s\-_ㆍ·|/\\]*",
+        "",
         text,
         flags=re.IGNORECASE
     )
-
-    # 맨 앞 @ 제거
-    text = re.sub(r'^@+', '', text)
-
-    # 공백 제거
-    text = re.sub(r'\s+', '', text)
-
-    # 특수문자 제거
-    text = re.sub(r'[^0-9a-z가-힣]', '', text)
+    text = re.sub(r"^@+", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^0-9a-z가-힣]", "", text)
 
     alias_map = {
         "쏘야": "쏘야",
@@ -146,6 +139,7 @@ def load_data():
             data["button_message_id"] = None
 
         return data
+
     except Exception:
         if os.path.exists(BACKUP_FILE):
             try:
@@ -161,7 +155,7 @@ def load_data():
 
                 save_data(data)
                 return data
-            except:
+            except Exception:
                 pass
 
         return {"users": {}, "status_message_id": None, "button_message_id": None}
@@ -209,7 +203,7 @@ def parse_dt(dt_str):
         return None
     try:
         return datetime.fromisoformat(dt_str)
-    except:
+    except Exception:
         return None
 
 
@@ -261,11 +255,11 @@ def get_ranking_users(limit=10):
 
 async def send_log(text: str):
     print(text)
-    channel = bot.get_channel(LOG_CHANNEL)
+    channel = bot.get_channel(LOG_CHANNEL_ID)
     if channel:
         try:
             await channel.send(text)
-        except:
+        except Exception:
             pass
 
 
@@ -311,7 +305,7 @@ async def update_status_message():
                 msg = await channel.fetch_message(int(msg_id))
                 await msg.edit(content=text)
                 return
-            except:
+            except Exception:
                 pass
 
         try:
@@ -328,63 +322,84 @@ class AttendanceView(View):
 
     @discord.ui.button(label="출근", style=discord.ButtonStyle.success, custom_id="raon_clock_in")
     async def clock_in_button(self, interaction: discord.Interaction, button: Button):
-        user = ensure_user(interaction.user.id, interaction.user.display_name)
+        await interaction.response.defer(ephemeral=True)
 
-        if user["is_working"]:
-            await interaction.response.send_message("이미 출근 상태입니다.", ephemeral=True)
-            return
+        try:
+            user = ensure_user(interaction.user.id, interaction.user.display_name)
 
-        user["is_working"] = True
-        user["last_clock_in"] = now_kst().isoformat()
-        save_data(attendance)
+            if user["is_working"]:
+                await interaction.followup.send("이미 출근 상태입니다.", ephemeral=True)
+                return
 
-        log_name = get_fixed_display_name(interaction.user.display_name)
+            user["is_working"] = True
+            user["last_clock_in"] = now_kst().isoformat()
+            save_data(attendance)
 
-        embed = discord.Embed(title="🟢 출근 기록", color=0x2ecc71)
-        embed.add_field(name="👤 관리자", value=log_name, inline=False)
-        embed.add_field(name="🕒 출근 시간", value=now_str(), inline=False)
+            log_name = get_fixed_display_name(interaction.user.display_name)
 
-        record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-        if record_channel:
-            await record_channel.send(embed=embed)
+            embed = discord.Embed(title="🟢 출근 기록", color=0x2ecc71)
+            embed.add_field(name="👤 관리자", value=log_name, inline=False)
+            embed.add_field(name="🕒 출근 시간", value=now_str(), inline=False)
 
-        await send_log(f"출근 완료 | {log_name}")
-        await update_status_message()
-        await interaction.response.send_message("출근 처리 완료", ephemeral=True)
+            record_channel = bot.get_channel(RECORD_CHANNEL_ID)
+            if record_channel:
+                await record_channel.send(embed=embed)
 
+            await send_log(f"출근 완료 | {log_name}")
+            await update_status_message()
+
+            await interaction.followup.send("출근 처리 완료", ephemeral=True)
+
+        except Exception as e:
+            await send_log(f"오류 | 출근 처리 실패 | {interaction.user.display_name} | {e}")
+            await interaction.followup.send("출근 처리 중 오류가 발생했습니다.", ephemeral=True)
 
     @discord.ui.button(label="퇴근", style=discord.ButtonStyle.danger, custom_id="raon_clock_out")
     async def clock_out_button(self, interaction: discord.Interaction, button: Button):
-        user = ensure_user(interaction.user.id, interaction.user.display_name)
+        await interaction.response.defer(ephemeral=True)
 
-        if not user["is_working"]:
-            await interaction.response.send_message("출근 기록이 없습니다.", ephemeral=True)
-            return
+        try:
+            user = ensure_user(interaction.user.id, interaction.user.display_name)
 
-        worked = get_current_work_seconds(user)
-        user["total_time"] = safe_int(user.get("total_time", 0)) + worked
-        user["is_working"] = False
-        user["last_clock_in"] = None
-        save_data(attendance)
+            if not user["is_working"]:
+                await interaction.followup.send("출근 기록이 없습니다.", ephemeral=True)
+                return
 
-        log_name = get_fixed_display_name(interaction.user.display_name)
+            worked = get_current_work_seconds(user)
+            user["total_time"] = safe_int(user.get("total_time", 0)) + worked
+            user["is_working"] = False
+            user["last_clock_in"] = None
+            save_data(attendance)
 
-        embed = discord.Embed(title="🔴 퇴근 기록", color=0xe74c3c)
-        embed.add_field(name="👤 관리자", value=log_name, inline=False)
-        embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
+            log_name = get_fixed_display_name(interaction.user.display_name)
 
-        record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-        if record_channel:
-            await record_channel.send(embed=embed)
+            embed = discord.Embed(title="🔴 퇴근 기록", color=0xe74c3c)
+            embed.add_field(name="👤 관리자", value=log_name, inline=False)
+            embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
 
-        await send_log(f"퇴근 완료 | {log_name}")
-        await update_status_message()
-        await interaction.response.send_message("퇴근 처리 완료", ephemeral=True)
+            record_channel = bot.get_channel(RECORD_CHANNEL_ID)
+            if record_channel:
+                await record_channel.send(embed=embed)
+
+            await send_log(f"퇴근 완료 | {log_name}")
+            await update_status_message()
+
+            await interaction.followup.send("퇴근 처리 완료", ephemeral=True)
+
+        except Exception as e:
+            await send_log(f"오류 | 퇴근 처리 실패 | {interaction.user.display_name} | {e}")
+            await interaction.followup.send("퇴근 처리 중 오류가 발생했습니다.", ephemeral=True)
 
     @discord.ui.button(label="근무현황", style=discord.ButtonStyle.primary, custom_id="raon_status_refresh")
     async def refresh_status_button(self, interaction: discord.Interaction, button: Button):
-        await update_status_message()
-        await interaction.response.send_message("근무현황을 갱신했습니다.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await update_status_message()
+            await interaction.followup.send("근무현황을 갱신했습니다.", ephemeral=True)
+        except Exception as e:
+            await send_log(f"오류 | 근무현황 갱신 실패 | {interaction.user.display_name} | {e}")
+            await interaction.followup.send("근무현황 갱신 중 오류가 발생했습니다.", ephemeral=True)
 
 
 async def ensure_button_message():
@@ -395,7 +410,6 @@ async def ensure_button_message():
 
     msg_id = attendance.get("button_message_id")
     view = AttendanceView()
-
     content = "📌 출퇴근 버튼\n\n아래 버튼을 눌러 출근 / 퇴근 / 근무현황을 이용해주세요."
 
     if msg_id:
@@ -403,7 +417,7 @@ async def ensure_button_message():
             msg = await channel.fetch_message(int(msg_id))
             await msg.edit(content=content, view=view)
             return
-        except:
+        except Exception:
             pass
 
     try:
