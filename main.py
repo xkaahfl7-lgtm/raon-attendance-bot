@@ -303,7 +303,7 @@ async def update_status_message():
         if msg_id:
             try:
                 msg = await channel.fetch_message(int(msg_id))
-                await msg.edit(content=text)
+                await msg.edit(content=text, view=None)
                 return
             except Exception:
                 pass
@@ -390,17 +390,6 @@ class AttendanceView(View):
             await send_log(f"오류 | 퇴근 처리 실패 | {interaction.user.display_name} | {e}")
             await interaction.followup.send("퇴근 처리 중 오류가 발생했습니다.", ephemeral=True)
 
-    @discord.ui.button(label="근무현황", style=discord.ButtonStyle.primary, custom_id="raon_status_refresh")
-    async def refresh_status_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            await update_status_message()
-            await interaction.followup.send("근무현황을 갱신했습니다.", ephemeral=True)
-        except Exception as e:
-            await send_log(f"오류 | 근무현황 갱신 실패 | {interaction.user.display_name} | {e}")
-            await interaction.followup.send("근무현황 갱신 중 오류가 발생했습니다.", ephemeral=True)
-
 
 async def ensure_button_message():
     channel = bot.get_channel(BUTTON_CHANNEL_ID)
@@ -410,7 +399,7 @@ async def ensure_button_message():
 
     msg_id = attendance.get("button_message_id")
     view = AttendanceView()
-    content = "📌 출퇴근 버튼\n\n아래 버튼을 눌러 출근 / 퇴근 / 근무현황을 이용해주세요."
+    content = "📌 출퇴근 버튼\n\n아래 버튼을 눌러 출근 / 퇴근을 이용해주세요."
 
     if msg_id:
         try:
