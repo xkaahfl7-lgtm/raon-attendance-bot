@@ -1,13 +1,10 @@
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button
-from datetime import datetime, timezone, timedelta
 import json
 import os
-import shutil
+from datetime import datetime
 import asyncio
-import re
-import unicodedata
 
 TOKEN = os.getenv("TOKEN")
 
@@ -19,444 +16,230 @@ STATUS_CHANNEL_ID = 1479036025820156035
 LOG_CHANNEL_ID = 1479382504204013568
 
 DATA_FILE = "attendance_data.json"
-BACKUP_FILE = "attendance_data_backup.json"
-
-KST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
 intents.members = True
-intents.guilds = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
-status_lock = asyncio.Lock()
 
-
-def now_kst():
-    return datetime.now(KST)
-
-
-def now_str():
-    return now_kst().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def safe_int(v):
-    try:
-        return int(v)
-    except Exception:
-        return 0
-
-
-def format_time(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    return f"{h}시간 {m:02d}분"
-
-
-def normalize_person_key(name: str) -> str:
-    if not name:
-        return ""
-
-    text = unicodedata.normalize("NFKC", str(name)).strip()
-    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
-    text = text.replace("(", "").replace(")", "")
-    text = text.replace("⭐", "")
-    text = text.lower()
-
-    text = re.sub(
-        r"^(gm|dgm|am|im|ig|st|staff|dev|admin|mod)[\s\-_ㆍ·|/\\]*",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
-    text = re.sub(r"^@+", "", text)
-    text = re.sub(r"\s+", "", text)
-    text = re.sub(r"[^0-9a-z가-힣]", "", text)
-
-    alias_map = {
-        "쏘야": "쏘야",
-        "soya": "쏘야",
-
-        "볶음": "볶음",
-        "bokkeum": "볶음",
-
-        "봉식": "봉식",
-        "bongsik": "봉식",
-
-        "우진": "우진",
-        "woojin": "우진",
-        "ujin": "우진",
-
-        "챠니": "챠니",
-        "chani": "챠니",
-
-        "호랭": "호랭",
-        "horang": "호랭",
-
-        "혁이": "혁이",
-        "hyuki": "혁이",
-        "hyuk": "혁이",
-
-        "백구": "백구",
-        "baekgu": "백구",
-    }
-
-    return alias_map.get(text, text)
-
-
-def get_fixed_display_name(name: str) -> str:
-    key = normalize_person_key(name)
-
-    mapping = {
-        "쏘야": "GMㆍ쏘야",
-        "볶음": "DEVㆍ볶음",
-        "봉식": "IGㆍ봉식",
-        "우진": "AMㆍ우진",
-        "챠니": "STㆍ챠니",
-        "호랭": "STㆍ호랭",
-        "혁이": "STㆍ혁이",
-        "백구": "STㆍ백구",
-    }
-
-    return mapping.get(key, str(name).strip())
-
-
-def get_role_label(display_name: str) -> str:
-    fixed_name = get_fixed_display_name(display_name)
-
-    if fixed_name.startswith("STㆍ"):
-        return "스태프"
-    return "관리자"
+lock = asyncio.Lock()
 
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        data = {"users": {}, "status_message_id": None, "button_message_id": None}
-        save_data(data)
-        return data
+        return {"users": {}, "status_message_id": None}
 
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if "users" not in data:
-            data["users"] = {}
-        if "status_message_id" not in data:
-            data["status_message_id"] = None
-        if "button_message_id" not in data:
-            data["button_message_id"] = None
-
-        return data
-
-    except Exception:
-        if os.path.exists(BACKUP_FILE):
-            try:
-                with open(BACKUP_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if "users" not in data:
-                    data["users"] = {}
-                if "status_message_id" not in data:
-                    data["status_message_id"] = None
-                if "button_message_id" not in data:
-                    data["button_message_id"] = None
-
-                save_data(data)
-                return data
-            except Exception:
-                pass
-
-        return {"users": {}, "status_message_id": None, "button_message_id": None}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def save_data(data):
-    temp_file = DATA_FILE + ".tmp"
-
-    if os.path.exists(DATA_FILE):
-        shutil.copyfile(DATA_FILE, BACKUP_FILE)
-
-    with open(temp_file, "w", encoding="utf-8") as f:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-
-    os.replace(temp_file, DATA_FILE)
 
 
 attendance = load_data()
 
 
-def ensure_user(user_id: int, display_name: str):
-    uid = str(user_id)
-
-    if uid not in attendance["users"]:
-        attendance["users"][uid] = {
-            "user_id": uid,
-            "display_name": get_fixed_display_name(display_name),
-            "raw_display_name": display_name,
-            "total_time": 0,
-            "is_working": False,
-            "last_clock_in": None
-        }
-    else:
-        attendance["users"][uid]["display_name"] = get_fixed_display_name(display_name)
-        attendance["users"][uid]["raw_display_name"] = display_name
-        attendance["users"][uid].setdefault("total_time", 0)
-        attendance["users"][uid].setdefault("is_working", False)
-        attendance["users"][uid].setdefault("last_clock_in", None)
-
-    return attendance["users"][uid]
+def now():
+    return datetime.now()
 
 
-def parse_dt(dt_str):
-    if not dt_str:
-        return None
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
+def format_time(sec):
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    return f"{h}시간 {m:02d}분"
 
 
-def get_current_work_seconds(user_data):
-    if not user_data.get("is_working"):
-        return 0
-
-    start_dt = parse_dt(user_data.get("last_clock_in"))
-    if not start_dt:
-        return 0
-
-    diff = now_kst() - start_dt
-    return max(0, int(diff.total_seconds()))
+def is_staff(name):
+    return name.startswith("STㆍ")
 
 
-def get_working_users():
-    rows = []
+def normalize(name):
+    return name.replace("⭐", "").replace(" ", "").lower()
+
+
+def merge_users():
+    merged = {}
 
     for uid, user in attendance["users"].items():
-        if user.get("is_working"):
-            rows.append({
-                "user_id": uid,
-                "display_name": user.get("display_name", uid),
-                "current_seconds": get_current_work_seconds(user)
-            })
 
-    rows.sort(key=lambda x: (-x["current_seconds"], x["display_name"]))
-    return rows
+        key = normalize(user["display_name"])
+
+        if key not in merged:
+            merged[key] = user
+        else:
+            merged[key]["total_time"] += user["total_time"]
+
+    attendance["users"] = {u["display_name"]: u for u in merged.values()}
 
 
-def get_ranking_users(limit=10):
+def build_board():
+
+    merge_users()
+
     rows = []
 
-    for uid, user in attendance["users"].items():
-        total = safe_int(user.get("total_time", 0))
-        if user.get("is_working"):
-            total += get_current_work_seconds(user)
+    for u in attendance["users"].values():
 
-        if total > 0:
-            rows.append({
-                "user_id": uid,
-                "display_name": user.get("display_name", uid),
-                "total_seconds": total
-            })
+        total = u["total_time"]
 
-    rows.sort(key=lambda x: (-x["total_seconds"], x["display_name"]))
-    return rows[:limit]
+        if u["is_working"]:
+            start = datetime.fromisoformat(u["last_clock_in"])
+            total += int((now() - start).total_seconds())
 
+        rows.append((u["display_name"], total))
 
-async def send_log(text: str):
-    print(text)
-    channel = bot.get_channel(LOG_CHANNEL_ID)
-    if channel:
-        try:
-            await channel.send(text)
-        except Exception:
-            pass
+    rows.sort(key=lambda x: x[1], reverse=True)
 
+    text = "📊 현재 근무중\n\n"
 
-def build_status_text():
-    working = get_working_users()
-    ranking = get_ranking_users()
+    for name, t in rows:
 
-    lines = []
-    lines.append("📊 현재 근무중")
-    lines.append("")
+        if attendance["users"][name]["is_working"]:
+            text += f"{name} - {format_time(t)}\n"
 
-    if not working:
-        lines.append("현재 근무중인 관리자가 없습니다.")
-    else:
-        for idx, row in enumerate(working, start=1):
-            lines.append(f"{idx}. {row['display_name']} - {format_time(row['current_seconds'])}")
+    text += "\n🏆 근무 랭킹\n\n"
 
-    lines.append("")
-    lines.append("🏆 근무 랭킹")
-    lines.append("")
+    for i, (name, t) in enumerate(rows[:10], 1):
+        text += f"{i}위 {name} - {format_time(t)}\n"
 
-    if not ranking:
-        lines.append("근무 데이터가 없습니다.")
-    else:
-        for idx, row in enumerate(ranking, start=1):
-            lines.append(f"{idx}위 {row['display_name']} - {format_time(row['total_seconds'])}")
-
-    return "\n".join(lines)
+    return text
 
 
-async def update_status_message():
-    async with status_lock:
+async def update_board():
+
+    async with lock:
+
         channel = bot.get_channel(STATUS_CHANNEL_ID)
-        if not channel:
-            await send_log("오류 | 관리자 근무확인 채널 없음")
-            return
 
-        text = build_status_text()
-        msg_id = attendance.get("status_message_id")
+        text = build_board()
+
+        msg_id = attendance["status_message_id"]
 
         if msg_id:
             try:
-                msg = await channel.fetch_message(int(msg_id))
-                await msg.edit(content=text, view=None)
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(content=text, view=StatusView())
                 return
-            except Exception:
+            except:
                 pass
 
-        try:
-            msg = await channel.send(text)
-            attendance["status_message_id"] = msg.id
-            save_data(attendance)
-        except Exception as e:
-            await send_log(f"오류 | 근무현황 메시지 생성 실패 | {e}")
+        msg = await channel.send(text, view=StatusView())
+        attendance["status_message_id"] = msg.id
+        save_data(attendance)
+
+
+class StatusView(View):
+
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction: discord.Interaction, button: Button):
+
+        await update_board()
+        await interaction.response.send_message("현황 새로고침 완료", ephemeral=True)
+
+    @discord.ui.button(label="현황판 복구", style=discord.ButtonStyle.secondary)
+    async def rebuild(self, interaction: discord.Interaction, button: Button):
+
+        attendance["status_message_id"] = None
+        save_data(attendance)
+
+        await update_board()
+
+        await interaction.response.send_message("현황판 복구 완료", ephemeral=True)
 
 
 class AttendanceView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
 
-    @discord.ui.button(label="출근", style=discord.ButtonStyle.success, custom_id="raon_clock_in")
-    async def clock_in_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
+    @discord.ui.button(label="출근", style=discord.ButtonStyle.green)
+    async def clockin(self, interaction: discord.Interaction, button: Button):
 
-        try:
-            user = ensure_user(interaction.user.id, interaction.user.display_name)
+        uid = str(interaction.user.id)
+        name = interaction.user.display_name
 
-            if user["is_working"]:
-                await interaction.followup.send("이미 출근 상태입니다.", ephemeral=True)
-                return
+        if uid not in attendance["users"]:
+            attendance["users"][uid] = {
+                "display_name": name,
+                "total_time": 0,
+                "is_working": False,
+                "last_clock_in": None
+            }
 
-            user["is_working"] = True
-            user["last_clock_in"] = now_kst().isoformat()
-            save_data(attendance)
+        user = attendance["users"][uid]
 
-            log_name = get_fixed_display_name(interaction.user.display_name)
-            role_label = get_role_label(interaction.user.display_name)
+        if user["is_working"]:
+            await interaction.response.send_message("이미 출근 상태입니다.", ephemeral=True)
+            return
 
-            embed = discord.Embed(title="🟢 출근 기록", color=0x2ecc71)
-            embed.add_field(name=f"👤 {role_label}", value=log_name, inline=False)
-            embed.add_field(name="🕒 출근 시간", value=now_str(), inline=False)
+        user["is_working"] = True
+        user["last_clock_in"] = now().isoformat()
 
-            record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-            if record_channel:
-                await record_channel.send(embed=embed)
+        save_data(attendance)
 
-            await send_log(f"출근 완료 | {role_label} | {log_name}")
-            await update_status_message()
+        await update_board()
 
-            await interaction.followup.send("출근 처리 완료", ephemeral=True)
+        await interaction.response.send_message("출근 완료", ephemeral=True)
 
-        except Exception as e:
-            await send_log(f"오류 | 출근 처리 실패 | {interaction.user.display_name} | {e}")
-            await interaction.followup.send("출근 처리 중 오류가 발생했습니다.", ephemeral=True)
+    @discord.ui.button(label="퇴근", style=discord.ButtonStyle.red)
+    async def clockout(self, interaction: discord.Interaction, button: Button):
 
-    @discord.ui.button(label="퇴근", style=discord.ButtonStyle.danger, custom_id="raon_clock_out")
-    async def clock_out_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
+        uid = str(interaction.user.id)
 
-        try:
-            user = ensure_user(interaction.user.id, interaction.user.display_name)
+        if uid not in attendance["users"]:
+            return
 
-            if not user["is_working"]:
-                await interaction.followup.send("출근 기록이 없습니다.", ephemeral=True)
-                return
+        user = attendance["users"][uid]
 
-            worked = get_current_work_seconds(user)
-            user["total_time"] = safe_int(user.get("total_time", 0)) + worked
-            user["is_working"] = False
-            user["last_clock_in"] = None
-            save_data(attendance)
+        if not user["is_working"]:
+            await interaction.response.send_message("출근 기록 없음", ephemeral=True)
+            return
 
-            log_name = get_fixed_display_name(interaction.user.display_name)
-            role_label = get_role_label(interaction.user.display_name)
+        start = datetime.fromisoformat(user["last_clock_in"])
 
-            embed = discord.Embed(title="🔴 퇴근 기록", color=0xe74c3c)
-            embed.add_field(name=f"👤 {role_label}", value=log_name, inline=False)
-            embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
+        sec = int((now() - start).total_seconds())
 
-            record_channel = bot.get_channel(RECORD_CHANNEL_ID)
-            if record_channel:
-                await record_channel.send(embed=embed)
+        user["total_time"] += sec
+        user["is_working"] = False
+        user["last_clock_in"] = None
 
-            await send_log(f"퇴근 완료 | {role_label} | {log_name}")
-            await update_status_message()
+        save_data(attendance)
 
-            await interaction.followup.send("퇴근 처리 완료", ephemeral=True)
+        await update_board()
 
-        except Exception as e:
-            await send_log(f"오류 | 퇴근 처리 실패 | {interaction.user.display_name} | {e}")
-            await interaction.followup.send("퇴근 처리 중 오류가 발생했습니다.", ephemeral=True)
+        await interaction.response.send_message("퇴근 완료", ephemeral=True)
 
 
-async def ensure_button_message():
-    channel = bot.get_channel(BUTTON_CHANNEL_ID)
-    if not channel:
-        await send_log("오류 | 출퇴근 버튼 채널 없음")
+@bot.tree.command(name="강제퇴근")
+async def force(interaction: discord.Interaction, 대상: str):
+
+    manager = interaction.user.display_name
+
+    if is_staff(manager):
+        await interaction.response.send_message("스태프는 사용 불가", ephemeral=True)
         return
 
-    msg_id = attendance.get("button_message_id")
-    view = AttendanceView()
-    content = "📌 출퇴근 버튼\n\n아래 버튼을 눌러 출근 / 퇴근을 이용해주세요."
+    for u in attendance["users"].values():
 
-    if msg_id:
-        try:
-            msg = await channel.fetch_message(int(msg_id))
-            await msg.edit(content=content, view=view)
-            return
-        except Exception:
-            pass
+        if 대상 in u["display_name"]:
 
-    try:
-        msg = await channel.send(content, view=view)
-        attendance["button_message_id"] = msg.id
-        save_data(attendance)
-    except Exception as e:
-        await send_log(f"오류 | 버튼 메시지 생성 실패 | {e}")
+            u["is_working"] = False
+            u["last_clock_in"] = None
 
+    save_data(attendance)
 
-@tasks.loop(seconds=60)
-async def auto_refresh_status():
-    await update_status_message()
+    await update_board()
+
+    await interaction.response.send_message("강제퇴근 완료", ephemeral=True)
 
 
 @bot.event
 async def on_ready():
-    global attendance
-    attendance = load_data()
-
-    for uid, user in attendance["users"].items():
-        fixed_name = get_fixed_display_name(user.get("raw_display_name") or user.get("display_name", uid))
-        user["display_name"] = fixed_name
-
-    save_data(attendance)
 
     bot.add_view(AttendanceView())
+    bot.add_view(StatusView())
 
-    await send_log("🤖 RAON 출퇴근 봇이 정상적으로 실행되었습니다.")
-    await ensure_button_message()
-    await update_status_message()
+    await update_board()
 
-    if not auto_refresh_status.is_running():
-        auto_refresh_status.start()
-
-    print(f"로그인 완료: {bot.user}")
+    print("RAON 출퇴근봇 실행됨")
 
 
-if __name__ == "__main__":
-    if not TOKEN:
-        raise ValueError("환경변수 TOKEN 이 비어 있습니다.")
-
-    bot.run(TOKEN)
+bot.run(TOKEN)
