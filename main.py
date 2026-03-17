@@ -121,6 +121,14 @@ def get_fixed_display_name(name: str) -> str:
     return mapping.get(key, str(name).strip())
 
 
+def get_role_label(display_name: str) -> str:
+    fixed_name = get_fixed_display_name(display_name)
+
+    if fixed_name.startswith("STㆍ"):
+        return "스태프"
+    return "관리자"
+
+
 def load_data():
     if not os.path.exists(DATA_FILE):
         data = {"users": {}, "status_message_id": None, "button_message_id": None}
@@ -336,16 +344,17 @@ class AttendanceView(View):
             save_data(attendance)
 
             log_name = get_fixed_display_name(interaction.user.display_name)
+            role_label = get_role_label(interaction.user.display_name)
 
             embed = discord.Embed(title="🟢 출근 기록", color=0x2ecc71)
-            embed.add_field(name="👤 관리자", value=log_name, inline=False)
+            embed.add_field(name=f"👤 {role_label}", value=log_name, inline=False)
             embed.add_field(name="🕒 출근 시간", value=now_str(), inline=False)
 
             record_channel = bot.get_channel(RECORD_CHANNEL_ID)
             if record_channel:
                 await record_channel.send(embed=embed)
 
-            await send_log(f"출근 완료 | {log_name}")
+            await send_log(f"출근 완료 | {role_label} | {log_name}")
             await update_status_message()
 
             await interaction.followup.send("출근 처리 완료", ephemeral=True)
@@ -372,16 +381,17 @@ class AttendanceView(View):
             save_data(attendance)
 
             log_name = get_fixed_display_name(interaction.user.display_name)
+            role_label = get_role_label(interaction.user.display_name)
 
             embed = discord.Embed(title="🔴 퇴근 기록", color=0xe74c3c)
-            embed.add_field(name="👤 관리자", value=log_name, inline=False)
+            embed.add_field(name=f"👤 {role_label}", value=log_name, inline=False)
             embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
 
             record_channel = bot.get_channel(RECORD_CHANNEL_ID)
             if record_channel:
                 await record_channel.send(embed=embed)
 
-            await send_log(f"퇴근 완료 | {log_name}")
+            await send_log(f"퇴근 완료 | {role_label} | {log_name}")
             await update_status_message()
 
             await interaction.followup.send("퇴근 처리 완료", ephemeral=True)
