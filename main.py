@@ -152,26 +152,46 @@ def load_data():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if "users" not in data:
+        if "users" not in data or not isinstance(data["users"], dict):
             data["users"] = {}
         if "status_message_id" not in data:
             data["status_message_id"] = None
         if "button_message_id" not in data:
             data["button_message_id"] = None
 
+        # 기존 데이터에 user_id 없으면 보정
+        for uid, user in data["users"].items():
+            if isinstance(user, dict):
+                user.setdefault("user_id", str(uid))
+                user.setdefault("display_name", str(uid))
+                user.setdefault("raw_display_name", user.get("display_name", str(uid)))
+                user.setdefault("total_time", 0)
+                user.setdefault("is_working", False)
+                user.setdefault("last_clock_in", None)
+
         return data
+
     except Exception:
         if os.path.exists(BACKUP_FILE):
             try:
                 with open(BACKUP_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                if "users" not in data:
+                if "users" not in data or not isinstance(data["users"], dict):
                     data["users"] = {}
                 if "status_message_id" not in data:
                     data["status_message_id"] = None
                 if "button_message_id" not in data:
                     data["button_message_id"] = None
+
+                for uid, user in data["users"].items():
+                    if isinstance(user, dict):
+                        user.setdefault("user_id", str(uid))
+                        user.setdefault("display_name", str(uid))
+                        user.setdefault("raw_display_name", user.get("display_name", str(uid)))
+                        user.setdefault("total_time", 0)
+                        user.setdefault("is_working", False)
+                        user.setdefault("last_clock_in", None)
 
                 save_data(data)
                 return data
@@ -200,7 +220,7 @@ def choose_keeper_uid(uids):
     numeric = [uid for uid in uids if str(uid).isdigit()]
     if numeric:
         return numeric[0]
-    return uids[0]
+    return str(uids[0])
 
 
 def compact_duplicate_users():
@@ -210,7 +230,7 @@ def compact_duplicate_users():
 
     groups = {}
 
-    for uid, user in users.items():
+    for uid, user in list(users.items()):
         base_name = user.get("raw_display_name") or user.get("display_name", uid)
         fixed_name = get_fixed_display_name(base_name)
         key = normalize_person_key(fixed_name)
@@ -228,30 +248,27 @@ def compact_duplicate_users():
 
     for _, items in groups.items():
         keeper_uid = choose_keeper_uid([item["uid"] for item in items])
-        fixed_name = items[0]["display_name"]
-        raw_name = items[0]["raw_display_name"]
 
         total_sum = sum(item["total_time"] for item in items)
 
+        # 현재 근무중은 한 사람당 1개만 유지: 가장 이른 출근시간 사용
         working_items = []
         for item in items:
             if item["is_working"] and item["last_clock_in"]:
-                working_items.append(item["last_clock_in"])
+                dt = parse_dt(item["last_clock_in"])
+                if dt:
+                    working_items.append((dt, item["last_clock_in"]))
 
         is_working = False
         last_clock_in = None
 
         if working_items:
-            # 가장 오래 근무중인 시작시간 1개만 유지
-            parsed = []
-            for dt_str in working_items:
-                dt = parse_dt(dt_str)
-                if dt:
-                    parsed.append((dt, dt_str))
-            if parsed:
-                parsed.sort(key=lambda x: x[0])  # 가장 이른 출근시간
-                is_working = True
-                last_clock_in = parsed[0][1]
+            working_items.sort(key=lambda x: x[0])
+            is_working = True
+            last_clock_in = working_items[0][1]
+
+        fixed_name = items[0]["display_name"]
+        raw_name = items[0]["raw_display_name"]
 
         new_users[str(keeper_uid)] = {
             "user_id": str(keeper_uid),
@@ -265,12 +282,14 @@ def compact_duplicate_users():
     attendance["users"] = new_users
 
 
-def find_user_uid_by_name(display_name: str):
+def find_existing_uid_by_name(display_name: str):
     target = normalize_person_key(display_name)
+
     for uid, user in attendance["users"].items():
         fixed_name = get_fixed_display_name(user.get("raw_display_name") or user.get("display_name", uid))
         if normalize_person_key(fixed_name) == target:
-            return uid
+            return str(uid)
+
     return None
 
 
@@ -278,8 +297,8 @@ def ensure_user(user_id: int, display_name: str):
     uid = str(user_id)
     fixed_name = get_fixed_display_name(display_name)
 
-    # 기존 같은 사람 데이터가 있으면 실제 디스코드 ID로 옮김
-    existing_uid = find_user_uid_by_name(fixed_name)
+    # 임시 복구 ID -> 실제 디스코드 ID로 이전
+    existing_uid = find_existing_uid_by_name(fixed_name)
 
     if existing_uid and existing_uid != uid and uid not in attendance["users"]:
         old_user = attendance["users"].pop(existing_uid)
@@ -302,9 +321,9 @@ def ensure_user(user_id: int, display_name: str):
             "last_clock_in": None,
         }
     else:
+        attendance["users"][uid]["user_id"] = uid
         attendance["users"][uid]["display_name"] = fixed_name
         attendance["users"][uid]["raw_display_name"] = display_name
-        attendance["users"][uid].setdefault("user_id", uid)
         attendance["users"][uid].setdefault("total_time", 0)
         attendance["users"][uid].setdefault("is_working", False)
         attendance["users"][uid].setdefault("last_clock_in", None)
@@ -450,8 +469,8 @@ class StatusView(View):
     async def rebuild_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            old_id = attendance.get("status_message_id")
             channel = bot.get_channel(STATUS_CHANNEL_ID)
+            old_id = attendance.get("status_message_id")
 
             if old_id and channel:
                 try:
@@ -602,6 +621,7 @@ async def force_clock_out(interaction: discord.Interaction, 대상: str):
             await interaction.followup.send(f"{target_name} 님은 현재 근무중이 아닙니다.", ephemeral=True)
             return
 
+        # 이번 근무시간은 누적하지 않음
         user["is_working"] = False
         user["last_clock_in"] = None
         save_data(attendance)
@@ -666,6 +686,7 @@ async def on_ready():
         fixed_name = get_fixed_display_name(user.get("raw_display_name") or user.get("display_name", uid))
         user["display_name"] = fixed_name
         user["raw_display_name"] = user.get("raw_display_name") or normalize_person_key(fixed_name)
+        user["user_id"] = str(uid)
 
     save_data(attendance)
 
@@ -681,8 +702,9 @@ async def on_ready():
 
     try:
         guild_obj = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild_obj)
         synced = await bot.tree.sync(guild=guild_obj)
+        if not synced:
+            synced = await bot.tree.sync()
         print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
         await send_log(f"슬래시 명령어 동기화 완료: {len(synced)}개")
     except Exception as e:
