@@ -295,6 +295,40 @@ def cleanup_invalid_working_states():
         save_data(attendance)
 
 
+def apply_manual_time_fixes():
+    """
+    혁이 누적 근무시간 최소 10시간 보장
+    10시간보다 적으면 10시간으로 맞춤
+    이미 10시간보다 많으면 그대로 유지
+    """
+    target_key = "혁이"
+    min_seconds = 10 * 60 * 60  # 10시간
+
+    matched_uid = None
+
+    for uid, user in attendance.get("users", {}).items():
+        check_name = user.get("raw_display_name") or user.get("display_name", uid)
+        if normalize_person_key(check_name) == target_key:
+            matched_uid = uid
+            break
+
+    if matched_uid is None:
+        # 혁이 데이터가 없으면 기본 데이터 생성
+        temp_uid = "manual_hyuk"
+        attendance["users"][temp_uid] = {
+            "user_id": temp_uid,
+            "display_name": "STㆍ혁이",
+            "raw_display_name": "혁이",
+            "total_time": min_seconds,
+            "is_working": False,
+            "last_clock_in": None,
+        }
+    else:
+        current_total = safe_int(attendance["users"][matched_uid].get("total_time", 0))
+        if current_total < min_seconds:
+            attendance["users"][matched_uid]["total_time"] = min_seconds
+
+
 def find_existing_uid_by_name(display_name: str):
     target = normalize_person_key(display_name)
 
@@ -342,6 +376,8 @@ def ensure_user(user_id: int, display_name: str):
 
     compact_duplicate_users()
     cleanup_invalid_working_states()
+    apply_manual_time_fixes()
+    compact_duplicate_users()
     save_data(attendance)
     return attendance["users"][uid]
 
@@ -415,6 +451,7 @@ def find_user_by_query(query: str):
 
     compact_duplicate_users()
     cleanup_invalid_working_states()
+    apply_manual_time_fixes()
 
     users = attendance.get("users", {})
 
@@ -497,6 +534,8 @@ class StatusView(View):
         try:
             compact_duplicate_users()
             cleanup_invalid_working_states()
+            apply_manual_time_fixes()
+            compact_duplicate_users()
 
             channel = bot.get_channel(STATUS_CHANNEL_ID)
             old_id = attendance.get("status_message_id")
@@ -527,6 +566,8 @@ async def ensure_status_message():
 
         compact_duplicate_users()
         cleanup_invalid_working_states()
+        apply_manual_time_fixes()
+        compact_duplicate_users()
 
         text = build_status_text()
         view = StatusView()
@@ -551,6 +592,8 @@ async def ensure_status_message():
 async def update_status_message():
     compact_duplicate_users()
     cleanup_invalid_working_states()
+    apply_manual_time_fixes()
+    compact_duplicate_users()
     save_data(attendance)
     await ensure_status_message()
 
@@ -637,6 +680,8 @@ async def force_clock_out(interaction: discord.Interaction, 대상: str):
     try:
         compact_duplicate_users()
         cleanup_invalid_working_states()
+        apply_manual_time_fixes()
+        compact_duplicate_users()
         save_data(attendance)
 
         manager_name = get_fixed_display_name(interaction.user.display_name)
@@ -735,6 +780,8 @@ async def on_ready():
 
     compact_duplicate_users()
     cleanup_invalid_working_states()
+    apply_manual_time_fixes()
+    compact_duplicate_users()
 
     for uid, user in attendance["users"].items():
         fixed_name = get_fixed_display_name(user.get("raw_display_name") or user.get("display_name", uid))
