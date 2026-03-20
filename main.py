@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import asyncio
+import re
+import unicodedata
 
 TOKEN = os.getenv("TOKEN")
 
@@ -27,6 +29,21 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 status_lock = asyncio.Lock()
+
+# 고정 명단
+ADMIN_KEYS = {"쏘야", "볶음", "우진", "봉식"}
+STAFF_KEYS = {"호랭", "백구", "혁이", "알루"}
+
+CANONICAL_DISPLAY = {
+    "쏘야": "GMㆍ쏘야",
+    "볶음": "DEVㆍ볶음",
+    "봉식": "IGㆍ봉식",
+    "우진": "AMㆍ우진",
+    "호랭": "STㆍ⭐호랭",
+    "백구": "STㆍ⭐백구",
+    "혁이": "STㆍ혁이",
+    "알루": "STㆍ알루",
+}
 
 
 def now_kst():
@@ -60,8 +77,69 @@ def parse_dt(dt_str):
         return None
 
 
-def is_real_user_key(uid: str) -> bool:
-    return str(uid).isdigit()
+def normalize_person_key(name: str) -> str:
+    if not name:
+        return ""
+
+    text = unicodedata.normalize("NFKC", str(name)).strip()
+    text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
+
+    # 문제 원인 제거
+    text = text.replace("(수정됨)", "")
+    text = text.replace("수정됨", "")
+
+    text = text.replace("(", "").replace(")", "")
+    text = text.replace("⭐", "")
+    text = text.lower()
+
+    # 앞 직급 제거
+    text = re.sub(
+        r"^(gm|dgm|am|im|ig|st|staff|dev|admin|mod)[\s\-_ㆍ·|/\\]*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(r"^@+", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^0-9a-z가-힣]", "", text)
+
+    alias_map = {
+        "쏘야": "쏘야",
+        "soya": "쏘야",
+        "볶음": "볶음",
+        "bokkeum": "볶음",
+        "봉식": "봉식",
+        "bongsik": "봉식",
+        "우진": "우진",
+        "woojin": "우진",
+        "ujin": "우진",
+        "호랭": "호랭",
+        "horang": "호랭",
+        "백구": "백구",
+        "baekgu": "백구",
+        "혁이": "혁이",
+        "hyuk": "혁이",
+        "hyuki": "혁이",
+        "알루": "알루",
+        "allu": "알루",
+        "alu": "알루",
+    }
+    return alias_map.get(text, text)
+
+
+def get_fixed_display_name(name: str) -> str:
+    key = normalize_person_key(name)
+    return CANONICAL_DISPLAY.get(key, str(name).strip())
+
+
+def get_role_label_from_name(name: str) -> str:
+    key = normalize_person_key(name)
+    if key in ADMIN_KEYS:
+        return "관리자"
+    if key in STAFF_KEYS:
+        return "스태프"
+    return "사용자"
 
 
 def load_data():
@@ -88,12 +166,12 @@ def load_data():
         data.setdefault("status_message_id", None)
         data.setdefault("button_message_id", None)
 
-        # 기존 데이터 보정
         for uid, user in list(data["users"].items()):
             if not isinstance(user, dict):
                 data["users"][uid] = {
                     "user_id": str(uid),
                     "display_name": str(uid),
+                    "raw_display_name": str(uid),
                     "total_time": 0,
                     "is_working": False,
                     "last_clock_in": None,
@@ -102,6 +180,7 @@ def load_data():
 
             user.setdefault("user_id", str(uid))
             user.setdefault("display_name", str(uid))
+            user.setdefault("raw_display_name", user.get("display_name", str(uid)))
             user.setdefault("total_time", 0)
             user.setdefault("is_working", False)
             user.setdefault("last_clock_in", None)
@@ -114,33 +193,10 @@ def load_data():
                 with open(BACKUP_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                if not isinstance(data, dict):
-                    return default_data
-
                 if "users" not in data or not isinstance(data["users"], dict):
                     data["users"] = {}
-
                 data.setdefault("status_message_id", None)
                 data.setdefault("button_message_id", None)
-
-                for uid, user in list(data["users"].items()):
-                    if not isinstance(user, dict):
-                        data["users"][uid] = {
-                            "user_id": str(uid),
-                            "display_name": str(uid),
-                            "total_time": 0,
-                            "is_working": False,
-                            "last_clock_in": None,
-                        }
-                        continue
-
-                    user.setdefault("user_id", str(uid))
-                    user.setdefault("display_name", str(uid))
-                    user.setdefault("total_time", 0)
-                    user.setdefault("is_working", False)
-                    user.setdefault("last_clock_in", None)
-
-                save_data(data)
                 return data
             except Exception:
                 pass
@@ -166,53 +222,113 @@ def save_data(data):
 attendance = load_data()
 
 
-def cleanup_users():
-    """
-    진짜 디스코드 유저 ID(숫자 키)만 실사용 대상으로 유지
-    숫자 아닌 임시 키는 랭킹/현황에서 무시
-    """
-    changed = False
+def choose_keeper_uid(uids):
+    numeric = [str(uid) for uid in uids if str(uid).isdigit()]
+    if numeric:
+        # 실제 디스코드 ID처럼 긴 숫자 우선
+        numeric.sort(key=lambda x: (-len(x), x))
+        return numeric[0]
+    return str(uids[0])
 
-    for uid, user in attendance.get("users", {}).items():
+
+def cleanup_and_merge_users():
+    users = attendance.get("users", {})
+    if not users:
+        return
+
+    groups = {}
+    for uid, user in list(users.items()):
         if not isinstance(user, dict):
             continue
 
-        user["user_id"] = str(uid)
-        user["display_name"] = str(user.get("display_name", uid))
-        user["total_time"] = safe_int(user.get("total_time", 0))
-        user["is_working"] = bool(user.get("is_working", False))
+        raw_name = user.get("raw_display_name") or user.get("display_name", uid)
+        key = normalize_person_key(raw_name)
+        fixed_name = get_fixed_display_name(raw_name)
 
-        if user.get("is_working"):
-            dt = parse_dt(user.get("last_clock_in"))
-            if not dt:
-                user["is_working"] = False
-                user["last_clock_in"] = None
-                changed = True
-        else:
-            user["last_clock_in"] = user.get("last_clock_in")
+        groups.setdefault(key, []).append({
+            "uid": str(uid),
+            "raw_display_name": raw_name,
+            "display_name": fixed_name,
+            "total_time": safe_int(user.get("total_time", 0)),
+            "is_working": bool(user.get("is_working", False)),
+            "last_clock_in": user.get("last_clock_in"),
+        })
 
-    if changed:
-        save_data(attendance)
+    new_users = {}
+
+    for key, items in groups.items():
+        keeper_uid = choose_keeper_uid([item["uid"] for item in items])
+
+        total_sum = 0
+        earliest_clock_in = None
+        is_working = False
+
+        for item in items:
+            total_sum += safe_int(item["total_time"])
+            if item["is_working"]:
+                dt = parse_dt(item.get("last_clock_in"))
+                if dt:
+                    is_working = True
+                    if earliest_clock_in is None or dt < earliest_clock_in[0]:
+                        earliest_clock_in = (dt, item["last_clock_in"])
+
+        raw_name = items[0]["raw_display_name"]
+        fixed_name = get_fixed_display_name(raw_name)
+
+        new_users[keeper_uid] = {
+            "user_id": keeper_uid,
+            "display_name": fixed_name,
+            "raw_display_name": raw_name,
+            "total_time": total_sum,
+            "is_working": is_working,
+            "last_clock_in": earliest_clock_in[1] if earliest_clock_in else None,
+        }
+
+    attendance["users"] = new_users
 
 
 def ensure_user(member: discord.Member):
     uid = str(member.id)
+    fixed_name = get_fixed_display_name(member.display_name)
+    target_key = normalize_person_key(member.display_name)
 
-    if uid not in attendance["users"] or not isinstance(attendance["users"][uid], dict):
+    # 같은 사람의 기존 데이터가 다른 uid에 있으면 실제 디스코드 uid로 이전
+    found_uid = None
+    for old_uid, user in attendance.get("users", {}).items():
+        raw_name = user.get("raw_display_name") or user.get("display_name", old_uid)
+        if normalize_person_key(raw_name) == target_key:
+            found_uid = str(old_uid)
+            break
+
+    if found_uid and found_uid != uid:
+        old_user = attendance["users"].pop(found_uid)
         attendance["users"][uid] = {
             "user_id": uid,
-            "display_name": member.display_name,
+            "display_name": fixed_name,
+            "raw_display_name": member.display_name,
+            "total_time": safe_int(old_user.get("total_time", 0)),
+            "is_working": bool(old_user.get("is_working", False)),
+            "last_clock_in": old_user.get("last_clock_in"),
+        }
+
+    if uid not in attendance["users"]:
+        attendance["users"][uid] = {
+            "user_id": uid,
+            "display_name": fixed_name,
+            "raw_display_name": member.display_name,
             "total_time": 0,
             "is_working": False,
             "last_clock_in": None,
         }
     else:
         attendance["users"][uid]["user_id"] = uid
-        attendance["users"][uid]["display_name"] = member.display_name
+        attendance["users"][uid]["display_name"] = fixed_name
+        attendance["users"][uid]["raw_display_name"] = member.display_name
         attendance["users"][uid]["total_time"] = safe_int(attendance["users"][uid].get("total_time", 0))
         attendance["users"][uid]["is_working"] = bool(attendance["users"][uid].get("is_working", False))
         attendance["users"][uid].setdefault("last_clock_in", None)
 
+    cleanup_and_merge_users()
     save_data(attendance)
     return attendance["users"][uid]
 
@@ -229,39 +345,60 @@ def get_current_work_seconds(user_data):
     return max(0, int(diff.total_seconds()))
 
 
-def get_working_users():
-    rows = []
+def build_grouped_users():
+    grouped = {}
 
     for uid, user in attendance.get("users", {}).items():
-        if not is_real_user_key(uid):
+        if not isinstance(user, dict):
             continue
 
-        if user.get("is_working", False):
-            current_seconds = get_current_work_seconds(user)
-            if current_seconds > 0:
-                rows.append({
-                    "display_name": user.get("display_name", uid),
-                    "current_seconds": current_seconds,
-                })
+        raw_name = user.get("raw_display_name") or user.get("display_name", uid)
+        group_key = normalize_person_key(raw_name)
+        fixed_name = get_fixed_display_name(raw_name)
+
+        if group_key not in grouped:
+            grouped[group_key] = {
+                "display_name": fixed_name,
+                "total_time": 0,
+                "current_seconds": 0,
+            }
+
+        grouped[group_key]["total_time"] += safe_int(user.get("total_time", 0))
+
+        current_seconds = get_current_work_seconds(user)
+        if current_seconds > 0:
+            grouped[group_key]["current_seconds"] = max(
+                grouped[group_key]["current_seconds"],
+                current_seconds
+            )
+
+    return grouped
+
+
+def get_working_users():
+    grouped = build_grouped_users()
+    rows = []
+
+    for _, user in grouped.items():
+        if user["current_seconds"] > 0:
+            rows.append({
+                "display_name": user["display_name"],
+                "current_seconds": user["current_seconds"],
+            })
 
     rows.sort(key=lambda x: (-x["current_seconds"], x["display_name"]))
     return rows
 
 
 def get_ranking_users(limit=10):
+    grouped = build_grouped_users()
     rows = []
 
-    for uid, user in attendance.get("users", {}).items():
-        if not is_real_user_key(uid):
-            continue
-
-        total_seconds = safe_int(user.get("total_time", 0))
-        if user.get("is_working", False):
-            total_seconds += get_current_work_seconds(user)
-
+    for _, user in grouped.items():
+        total_seconds = user["total_time"] + user["current_seconds"]
         if total_seconds > 0:
             rows.append({
-                "display_name": user.get("display_name", uid),
+                "display_name": user["display_name"],
                 "total_seconds": total_seconds,
             })
 
@@ -309,7 +446,6 @@ class StatusView(View):
     @discord.ui.button(label="새로고침", style=discord.ButtonStyle.primary, custom_id="raon_status_refresh")
     async def refresh_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-
         try:
             await update_status_message()
             await interaction.followup.send("근무현황 새로고침 완료", ephemeral=True)
@@ -320,8 +456,9 @@ class StatusView(View):
     @discord.ui.button(label="현황판 복구", style=discord.ButtonStyle.secondary, custom_id="raon_status_rebuild")
     async def rebuild_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-
         try:
+            cleanup_and_merge_users()
+
             channel = bot.get_channel(STATUS_CHANNEL_ID)
             old_id = attendance.get("status_message_id")
 
@@ -349,7 +486,7 @@ async def ensure_status_message():
             await send_log("오류 | 관리자 근무확인 채널 없음")
             return
 
-        cleanup_users()
+        cleanup_and_merge_users()
 
         text = build_status_text()
         view = StatusView()
@@ -372,7 +509,7 @@ async def ensure_status_message():
 
 
 async def update_status_message():
-    cleanup_users()
+    cleanup_and_merge_users()
     save_data(attendance)
     await ensure_status_message()
 
@@ -396,15 +533,18 @@ class AttendanceView(View):
             user["last_clock_in"] = now_kst().isoformat()
             save_data(attendance)
 
+            fixed_name = get_fixed_display_name(interaction.user.display_name)
+            role_label = get_role_label_from_name(interaction.user.display_name)
+
             embed = discord.Embed(title="🟢 출근 기록", color=0x2ECC71)
-            embed.add_field(name="👤 사용자", value=interaction.user.display_name, inline=False)
+            embed.add_field(name=f"👤 {role_label}", value=fixed_name, inline=False)
             embed.add_field(name="🕒 출근 시간", value=now_str(), inline=False)
 
             record_channel = bot.get_channel(RECORD_CHANNEL_ID)
             if record_channel:
                 await record_channel.send(embed=embed)
 
-            await send_log(f"출근 완료 | {interaction.user.display_name}")
+            await send_log(f"출근 완료 | {role_label} | {fixed_name}")
             await update_status_message()
             await interaction.followup.send("출근 처리 완료", ephemeral=True)
 
@@ -429,8 +569,11 @@ class AttendanceView(View):
             user["last_clock_in"] = None
             save_data(attendance)
 
+            fixed_name = get_fixed_display_name(interaction.user.display_name)
+            role_label = get_role_label_from_name(interaction.user.display_name)
+
             embed = discord.Embed(title="🔴 퇴근 기록", color=0xE74C3C)
-            embed.add_field(name="👤 사용자", value=interaction.user.display_name, inline=False)
+            embed.add_field(name=f"👤 {role_label}", value=fixed_name, inline=False)
             embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
             embed.add_field(name="⏱ 이번 근무", value=format_time(worked), inline=False)
 
@@ -438,7 +581,7 @@ class AttendanceView(View):
             if record_channel:
                 await record_channel.send(embed=embed)
 
-            await send_log(f"퇴근 완료 | {interaction.user.display_name} | {format_time(worked)}")
+            await send_log(f"퇴근 완료 | {role_label} | {fixed_name}")
             await update_status_message()
             await interaction.followup.send("퇴근 처리 완료", ephemeral=True)
 
@@ -452,37 +595,33 @@ async def force_clock_out(interaction: discord.Interaction, 대상: discord.Memb
     await interaction.response.defer(ephemeral=True)
 
     try:
-        manager_id = str(interaction.user.id)
-        target_id = str(대상.id)
+        uid = str(대상.id)
 
-        # 스태프 차단 로직이 꼭 필요하면 역할 ID 기준으로 바꾸는 게 맞지만,
-        # 지금은 일단 기존 이름 꼬임 없애는 게 우선이라 권한 제한은 생략.
-        if target_id not in attendance.get("users", {}):
-            await interaction.followup.send(f"{대상.display_name} 님은 근무 데이터가 없습니다.", ephemeral=True)
-            return
-
-        user = attendance["users"][target_id]
-
-        if not user.get("is_working", False):
+        if uid not in attendance["users"] or not attendance["users"][uid].get("is_working", False):
             await interaction.followup.send(f"{대상.display_name} 님은 현재 근무중이 아닙니다.", ephemeral=True)
             return
 
+        user = attendance["users"][uid]
         user["is_working"] = False
         user["last_clock_in"] = None
         save_data(attendance)
 
+        target_name = get_fixed_display_name(대상.display_name)
+        target_role = get_role_label_from_name(대상.display_name)
+        manager_name = get_fixed_display_name(interaction.user.display_name)
+
         record_channel = bot.get_channel(RECORD_CHANNEL_ID)
         if record_channel:
             embed = discord.Embed(title="⚫ 강제 퇴근 기록", color=0x555555)
-            embed.add_field(name="👤 대상자", value=대상.display_name, inline=False)
-            embed.add_field(name="🛠 처리자", value=interaction.user.display_name, inline=False)
-            embed.add_field(name="🕒 처리 시간", value=now_str(), inline=False)
+            embed.add_field(name=f"👤 {target_role}", value=target_name, inline=False)
+            embed.add_field(name="🛠 처리자", value=manager_name, inline=False)
+            embed.add_field(name="🕒 퇴근 시간", value=now_str(), inline=False)
             embed.add_field(name="🗑 처리 방식", value="이번 근무시간 미반영", inline=False)
             await record_channel.send(embed=embed)
 
-        await send_log(f"강제퇴근 완료 | 대상 {대상.display_name} | 처리자 {interaction.user.display_name}")
+        await send_log(f"강제퇴근 완료 | {target_role} | {target_name} | 처리자 {manager_name}")
         await update_status_message()
-        await interaction.followup.send(f"{대상.display_name} 강제퇴근 처리 완료", ephemeral=True)
+        await interaction.followup.send(f"{target_name} 강제퇴근 처리 완료", ephemeral=True)
 
     except Exception as e:
         await send_log(f"오류 | 강제퇴근 실패 | {interaction.user.display_name} | {e}")
@@ -525,7 +664,7 @@ async def on_ready():
     global attendance
     attendance = load_data()
 
-    cleanup_users()
+    cleanup_and_merge_users()
     save_data(attendance)
 
     bot.add_view(AttendanceView())
