@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button
+from discord import app_commands
 from datetime import datetime, timezone, timedelta
 import json
 import os
@@ -84,12 +85,11 @@ def normalize_person_key(name: str) -> str:
     text = unicodedata.normalize("NFKC", str(name)).strip()
     text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
 
-    # 문제 원인 제거
+    # 자주 꼬이던 표시 제거
     text = text.replace("(수정됨)", "")
     text = text.replace("수정됨", "")
-
-    text = text.replace("(", "").replace(")", "")
     text = text.replace("⭐", "")
+    text = text.replace("(", "").replace(")", "")
     text = text.lower()
 
     # 앞 직급 제거
@@ -122,8 +122,8 @@ def normalize_person_key(name: str) -> str:
         "hyuk": "혁이",
         "hyuki": "혁이",
         "알루": "알루",
-        "allu": "알루",
         "alu": "알루",
+        "allu": "알루",
     }
     return alias_map.get(text, text)
 
@@ -195,8 +195,10 @@ def load_data():
 
                 if "users" not in data or not isinstance(data["users"], dict):
                     data["users"] = {}
+
                 data.setdefault("status_message_id", None)
                 data.setdefault("button_message_id", None)
+                save_data(data)
                 return data
             except Exception:
                 pass
@@ -225,13 +227,63 @@ attendance = load_data()
 def choose_keeper_uid(uids):
     numeric = [str(uid) for uid in uids if str(uid).isdigit()]
     if numeric:
-        # 실제 디스코드 ID처럼 긴 숫자 우선
         numeric.sort(key=lambda x: (-len(x), x))
         return numeric[0]
     return str(uids[0])
 
 
+def get_current_work_seconds(user_data):
+    if not user_data.get("is_working", False):
+        return 0
+
+    start_dt = parse_dt(user_data.get("last_clock_in"))
+    if not start_dt:
+        return 0
+
+    diff = now_kst() - start_dt
+    return max(0, int(diff.total_seconds()))
+
+
+def scan_duplicates():
+    """
+    현재 raw 데이터에서 중복 후보를 스캔만 함.
+    자동 삭제는 하지 않음.
+    """
+    groups = {}
+    for uid, user in attendance.get("users", {}).items():
+        if not isinstance(user, dict):
+            continue
+
+        raw_name = user.get("raw_display_name") or user.get("display_name", uid)
+        key = normalize_person_key(raw_name)
+        fixed_name = get_fixed_display_name(raw_name)
+
+        total_time = safe_int(user.get("total_time", 0))
+        current_seconds = get_current_work_seconds(user)
+        is_working = bool(user.get("is_working", False))
+
+        groups.setdefault(key, []).append({
+            "uid": str(uid),
+            "display_name": fixed_name,
+            "raw_display_name": raw_name,
+            "base_total": total_time,
+            "current_seconds": current_seconds,
+            "sum_seconds": total_time + current_seconds,
+            "is_working": is_working,
+            "last_clock_in": user.get("last_clock_in"),
+        })
+
+    return {k: v for k, v in groups.items() if len(v) >= 2}
+
+
 def cleanup_and_merge_users():
+    """
+    자동 정리:
+    같은 사람으로 보이는 데이터가 여러 개면
+    - total_time 합산
+    - 근무중은 가장 이른 출근시간 1개 유지
+    - 표시명은 고정 이름으로 통일
+    """
     users = attendance.get("users", {})
     if not users:
         return
@@ -256,7 +308,7 @@ def cleanup_and_merge_users():
 
     new_users = {}
 
-    for key, items in groups.items():
+    for _, items in groups.items():
         keeper_uid = choose_keeper_uid([item["uid"] for item in items])
 
         total_sum = 0
@@ -287,12 +339,64 @@ def cleanup_and_merge_users():
     attendance["users"] = new_users
 
 
+def delete_duplicate_for_name(name: str):
+    """
+    /중복삭제 이름:우진
+    - 같은 이름 중복 중
+    - 총 시간이 가장 큰 항목을 유지
+    - 나머지는 삭제
+    - 현재 근무중인 큰 항목이 있으면 그쪽 우선
+    """
+    target_key = normalize_person_key(name)
+    groups = scan_duplicates()
+
+    if target_key not in groups:
+        return False, "중복 데이터가 없습니다."
+
+    items = groups[target_key]
+
+    # 현재 근무중 + 총시간 큰 순서로 유지 대상 선택
+    items_sorted = sorted(
+        items,
+        key=lambda x: (
+            1 if x["is_working"] else 0,
+            x["sum_seconds"],
+            len(x["uid"]) if x["uid"].isdigit() else 0,
+        ),
+        reverse=True,
+    )
+
+    keeper = items_sorted[0]
+    delete_items = items_sorted[1:]
+
+    # 삭제 전 합산 여부 판단
+    # 큰 시간 유지 / 작은 시간 삭제 방식
+    # 단, 이미 큰 시간에 정상 누적이 들어있다고 보고 작은 시간은 삭제만 함
+    for item in delete_items:
+        uid = item["uid"]
+        if uid in attendance["users"]:
+            del attendance["users"][uid]
+
+    # 표시명 보정
+    if keeper["uid"] in attendance["users"]:
+        attendance["users"][keeper["uid"]]["display_name"] = get_fixed_display_name(name)
+        attendance["users"][keeper["uid"]]["raw_display_name"] = name
+
+    save_data(attendance)
+    return True, {
+        "name": get_fixed_display_name(name),
+        "keeper_uid": keeper["uid"],
+        "keeper_time": keeper["sum_seconds"],
+        "deleted": delete_items,
+    }
+
+
 def ensure_user(member: discord.Member):
     uid = str(member.id)
     fixed_name = get_fixed_display_name(member.display_name)
     target_key = normalize_person_key(member.display_name)
 
-    # 같은 사람의 기존 데이터가 다른 uid에 있으면 실제 디스코드 uid로 이전
+    # 같은 사람의 예전 키가 있으면 실제 디스코드 uid로 이전
     found_uid = None
     for old_uid, user in attendance.get("users", {}).items():
         raw_name = user.get("raw_display_name") or user.get("display_name", old_uid)
@@ -331,18 +435,6 @@ def ensure_user(member: discord.Member):
     cleanup_and_merge_users()
     save_data(attendance)
     return attendance["users"][uid]
-
-
-def get_current_work_seconds(user_data):
-    if not user_data.get("is_working", False):
-        return 0
-
-    start_dt = parse_dt(user_data.get("last_clock_in"))
-    if not start_dt:
-        return 0
-
-    diff = now_kst() - start_dt
-    return max(0, int(diff.total_seconds()))
 
 
 def build_grouped_users():
@@ -591,6 +683,7 @@ class AttendanceView(View):
 
 
 @bot.tree.command(name="강제퇴근", description="근무중인 유저를 강제로 퇴근 처리합니다. (근무시간 미반영)")
+@app_commands.describe(대상="강제퇴근할 유저를 선택하세요")
 async def force_clock_out(interaction: discord.Interaction, 대상: discord.Member):
     await interaction.response.defer(ephemeral=True)
 
@@ -626,6 +719,80 @@ async def force_clock_out(interaction: discord.Interaction, 대상: discord.Memb
     except Exception as e:
         await send_log(f"오류 | 강제퇴근 실패 | {interaction.user.display_name} | {e}")
         await interaction.followup.send("강제퇴근 처리 중 오류가 발생했습니다.", ephemeral=True)
+
+
+@bot.tree.command(name="중복확인", description="근무 데이터 중 이름 중복을 확인합니다.")
+async def check_duplicates(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        groups = scan_duplicates()
+
+        if not groups:
+            await interaction.followup.send("중복 데이터가 없습니다.", ephemeral=True)
+            return
+
+        lines = ["중복 데이터 확인 결과", ""]
+
+        for key, items in groups.items():
+            fixed_name = get_fixed_display_name(key)
+            lines.append(f"이름: {fixed_name} / {len(items)}개")
+            for idx, item in enumerate(
+                sorted(items, key=lambda x: (x["sum_seconds"], x["uid"]), reverse=True),
+                start=1,
+            ):
+                lines.append(
+                    f"  {idx}) uid={item['uid']} | 표시={item['display_name']} | "
+                    f"누적={format_time(item['base_total'])} | 현재={format_time(item['current_seconds'])} | "
+                    f"합계={format_time(item['sum_seconds'])}"
+                )
+            lines.append("")
+
+        message = "\n".join(lines)
+        if len(message) > 1900:
+            message = message[:1900] + "\n...(생략됨)"
+
+        await interaction.followup.send(f"```{message}```", ephemeral=True)
+
+    except Exception as e:
+        await send_log(f"오류 | 중복확인 실패 | {interaction.user.display_name} | {e}")
+        await interaction.followup.send("중복확인 중 오류가 발생했습니다.", ephemeral=True)
+
+
+@bot.tree.command(name="중복삭제", description="같은 이름의 중복 데이터 중 작은 시간을 삭제합니다.")
+@app_commands.describe(이름="예: 우진, 백구, 호랭")
+async def remove_duplicate(interaction: discord.Interaction, 이름: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        success, result = delete_duplicate_for_name(이름)
+
+        if not success:
+            await interaction.followup.send(str(result), ephemeral=True)
+            return
+
+        deleted_text = []
+        for item in result["deleted"]:
+            deleted_text.append(
+                f"삭제 uid={item['uid']} / 시간={format_time(item['sum_seconds'])}"
+            )
+
+        if not deleted_text:
+            deleted_text.append("삭제된 항목 없음")
+
+        await update_status_message()
+
+        msg = (
+            f"{result['name']} 중복삭제 완료\n"
+            f"유지 uid={result['keeper_uid']} / 시간={format_time(result['keeper_time'])}\n"
+            + "\n".join(deleted_text)
+        )
+
+        await interaction.followup.send(f"```{msg}```", ephemeral=True)
+
+    except Exception as e:
+        await send_log(f"오류 | 중복삭제 실패 | {interaction.user.display_name} | {e}")
+        await interaction.followup.send("중복삭제 중 오류가 발생했습니다.", ephemeral=True)
 
 
 async def ensure_button_message():
