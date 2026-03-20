@@ -7,7 +7,8 @@ import os
 import asyncio
 import re
 
-TOKEN = "여기에_봇토큰"
+import os
+TOKEN = os.getenv("TOKEN")
 GUILD_ID = 123456789012345678
 
 BUTTON_CHANNEL_ID = 123456789012345678   # 출퇴근 버튼 채널
