@@ -2,45 +2,52 @@
     "users": {
         "1": {
             "user_id": "1",
-            "display_name": "DEVㆍ볶음",
-            "total_time": 201600,
-            "is_working": false,
-            "last_clock_in": null
+            "display_name": "DEVᆞ볶음",
+            "total_time": 208800,
+            "is_working": true,
+            "last_clock_in": 1700000000
         },
         "2": {
             "user_id": "2",
-            "display_name": "IGㆍ봉식",
-            "total_time": 94440,
-            "is_working": false,
-            "last_clock_in": null
+            "display_name": "IGᆞ봉식",
+            "total_time": 100800,
+            "is_working": true,
+            "last_clock_in": 1700000000
         },
         "3": {
             "user_id": "3",
-            "display_name": "AMㆍ우진",
-            "total_time": 92580,
+            "display_name": "AMᆞ우진",
+            "total_time": 97200,
             "is_working": false,
             "last_clock_in": null
         },
         "4": {
             "user_id": "4",
-            "display_name": "STㆍ⭐백구",
-            "total_time": 57480,
-            "is_working": false,
-            "last_clock_in": null
+            "display_name": "STAFFᆞ백구",
+            "total_time": 61200,
+            "is_working": true,
+            "last_clock_in": 1700000000
         },
         "5": {
             "user_id": "5",
-            "display_name": "STㆍ혁이",
-            "total_time": 36000,
+            "display_name": "STAFFᆞ혁이",
+            "total_time": 39600,
             "is_working": false,
             "last_clock_in": null
         },
         "6": {
             "user_id": "6",
-            "display_name": "STㆍ⭐호랭",
-            "total_time": 25320,
-            "is_working": false,
-            "last_clock_in": null
+            "display_name": "STAFFᆞ호랭",
+            "total_time": 32400,
+            "is_working": true,
+            "last_clock_in": 1700000000
+        },
+        "7": {
+            "user_id": "7",
+            "display_name": "🚗알루ᅵ차량개발자🚗",
+            "total_time": 10800,
+            "is_working": true,
+            "last_clock_in": 1700000000
         }
     },
     "status_message_id": null,
