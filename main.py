@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import os
 import re
+import unicodedata
 
 TOKEN = os.getenv("TOKEN")
 
@@ -37,43 +38,60 @@ def format_seconds(sec: int) -> str:
     return f"{h}시간 {m:02d}분"
 
 
+def normalize_text_style(text: str) -> str:
+    if not text:
+        return ""
+    return unicodedata.normalize("NFKC", str(text))
+
+
 def clean_display_name(name: str) -> str:
     if not name:
         return "알수없음"
+
+    name = normalize_text_style(name)
     name = name.replace("⭐", "").replace("★", "").strip()
     name = re.sub(r"\s+", " ", name)
-    return name.strip()
+    return name.strip() if name.strip() else "알수없음"
 
 
 def normalize_core_name(name: str) -> str:
     if not name:
         return "알수없음"
 
+    name = normalize_text_style(name)
     name = clean_display_name(name)
 
     prefixes = [
         "DEVㆍ", "DGMㆍ", "GMㆍ", "AMㆍ", "IMㆍ", "IGㆍ",
-        "STㆍ", "STAFFㆍ", "STAFF ", "ST ", "DEV ", "AM ", "IG "
+        "STㆍ", "STAFFㆍ",
+        "DEV ", "DGM ", "GM ", "AM ", "IM ", "IG ",
+        "ST ", "STAFF "
     ]
 
     changed = True
     while changed:
         changed = False
+        upper_name = name.upper()
         for p in prefixes:
-            if name.upper().startswith(p.upper()):
+            if upper_name.startswith(p.upper()):
                 name = name[len(p):].strip()
                 changed = True
+                upper_name = name.upper()
 
-    name = name.replace("ㆍ", "").strip()
+    name = normalize_text_style(name)
+    name = name.replace("ㆍ", "")
     name = re.sub(r"^[\-\|\•·\s]+", "", name).strip()
+    name = re.sub(r"\s+", "", name)
+
     return name if name else "알수없음"
 
 
 def default_user_entry(user_id: str, display_name: str = "알수없음"):
+    cleaned_name = clean_display_name(display_name)
     return {
         "user_id": str(user_id),
-        "display_name": clean_display_name(display_name),
-        "core_name": normalize_core_name(display_name),
+        "display_name": cleaned_name,
+        "core_name": normalize_core_name(cleaned_name),
         "total_seconds": 0,
         "work_count": 0,
         "is_working": False,
@@ -134,12 +152,17 @@ def merge_entries(base, extra):
             a = base.get("clock_in_ts")
             b = extra.get("clock_in_ts")
             if a and b:
-                base["clock_in_ts"] = min(a, b)
+                base["clock_in_ts"] = min(int(a), int(b))
             elif b:
                 base["clock_in_ts"] = b
 
-    if len(extra.get("display_name", "")) > len(base.get("display_name", "")):
-        base["display_name"] = clean_display_name(extra.get("display_name", base["display_name"]))
+    extra_display = clean_display_name(extra.get("display_name", "알수없음"))
+    base_display = clean_display_name(base.get("display_name", "알수없음"))
+
+    if len(extra_display) > len(base_display):
+        base["display_name"] = extra_display
+    else:
+        base["display_name"] = base_display
 
     base["core_name"] = normalize_core_name(base["display_name"])
     return base
@@ -147,7 +170,8 @@ def merge_entries(base, extra):
 
 def migrate_legacy_data(data):
     users = data.get("users", {})
-    temp_merge_by_key = {}
+    by_user_id = {}
+    legacy_name_entries = []
 
     for key, value in users.items():
         if not isinstance(value, dict):
@@ -160,6 +184,8 @@ def migrate_legacy_data(data):
             or str(key)
         )
 
+        display_name = clean_display_name(display_name)
+
         user_id = str(
             value.get("user_id")
             or value.get("id")
@@ -167,62 +193,67 @@ def migrate_legacy_data(data):
         )
 
         entry = default_user_entry(user_id, display_name)
-
         entry["total_seconds"] = int(value.get("total_seconds", value.get("total_time", 0)) or 0)
         entry["today_seconds"] = int(value.get("today_seconds", 0) or 0)
         entry["work_count"] = int(value.get("work_count", value.get("count", 0)) or 0)
         entry["is_working"] = bool(value.get("is_working", value.get("working", False)))
         entry["clock_in_ts"] = value.get("clock_in_ts", value.get("start_time"))
-        entry["display_name"] = clean_display_name(display_name)
+        entry["display_name"] = display_name
         entry["core_name"] = normalize_core_name(display_name)
 
         if user_id.isdigit():
-            merge_key = f"id:{user_id}"
+            if user_id not in by_user_id:
+                by_user_id[user_id] = entry
+            else:
+                by_user_id[user_id] = merge_entries(by_user_id[user_id], entry)
         else:
-            merge_key = f"name:{entry['core_name']}"
+            legacy_name_entries.append(entry)
 
-        if merge_key not in temp_merge_by_key:
-            temp_merge_by_key[merge_key] = entry
-        else:
-            temp_merge_by_key[merge_key] = merge_entries(temp_merge_by_key[merge_key], entry)
+    core_to_real_id = {}
+    for uid, entry in by_user_id.items():
+        core = normalize_core_name(entry.get("display_name", "알수없음"))
+        if core not in core_to_real_id:
+            core_to_real_id[core] = uid
 
-    id_entries = {}
-    name_entries = []
+    for entry in legacy_name_entries:
+        core = normalize_core_name(entry.get("display_name", "알수없음"))
 
-    for mk, entry in temp_merge_by_key.items():
-        if mk.startswith("id:"):
-            id_entries[entry["user_id"]] = entry
-        else:
-            name_entries.append(entry)
-
-    core_to_id = {}
-    for uid, entry in id_entries.items():
-        core_to_id.setdefault(entry["core_name"], uid)
-
-    for entry in name_entries:
-        core = entry["core_name"]
-        if core in core_to_id:
-            uid = core_to_id[core]
-            id_entries[uid] = merge_entries(id_entries[uid], entry)
+        if core in core_to_real_id:
+            real_uid = core_to_real_id[core]
+            by_user_id[real_uid] = merge_entries(by_user_id[real_uid], entry)
         else:
             fake_uid = f"legacy_{core}"
-            if fake_uid not in id_entries:
-                entry["user_id"] = fake_uid
-                id_entries[fake_uid] = entry
+            entry["user_id"] = fake_uid
+            if fake_uid not in by_user_id:
+                by_user_id[fake_uid] = entry
             else:
-                id_entries[fake_uid] = merge_entries(id_entries[fake_uid], entry)
+                by_user_id[fake_uid] = merge_entries(by_user_id[fake_uid], entry)
 
     cleaned_users = {}
-    for uid, entry in id_entries.items():
+    second_merge = {}
+
+    for uid, entry in by_user_id.items():
+        entry["display_name"] = clean_display_name(entry.get("display_name", "알수없음"))
+        entry["core_name"] = normalize_core_name(entry["display_name"])
+
         total_sec = int(entry.get("total_seconds", 0))
         is_working = bool(entry.get("is_working", False))
 
         if total_sec <= 0 and not is_working:
             continue
 
-        entry["display_name"] = clean_display_name(entry.get("display_name", "알수없음"))
-        entry["core_name"] = normalize_core_name(entry["display_name"])
-        cleaned_users[uid] = entry
+        if str(uid).isdigit():
+            merge_key = f"id:{uid}"
+        else:
+            merge_key = f"name:{entry['core_name']}"
+
+        if merge_key not in second_merge:
+            second_merge[merge_key] = entry
+        else:
+            second_merge[merge_key] = merge_entries(second_merge[merge_key], entry)
+
+    for uid, entry in second_merge.items():
+        cleaned_users[entry["user_id"]] = entry
 
     data["users"] = cleaned_users
     return data
@@ -309,8 +340,8 @@ async def build_status_embed(guild: discord.Guild):
             }
         else:
             merged_ranking[core_name]["seconds"] += total_sec
-
             current_name = merged_ranking[core_name]["display_name"]
+
             if len(display_name) > len(current_name):
                 merged_ranking[core_name]["display_name"] = display_name
 
@@ -344,7 +375,7 @@ async def build_status_embed(guild: discord.Guild):
     return embed
 
 
-async def update_status_message():
+async def update_status_message(force_new: bool = False):
     guild = bot.get_guild(GUILD_ID)
     if guild is None:
         return
@@ -355,6 +386,10 @@ async def update_status_message():
 
     embed = await build_status_embed(guild)
     view = StatusControlView()
+
+    if force_new:
+        data["status_message_id"] = None
+        save_data(data)
 
     message_id = data.get("status_message_id")
     if message_id:
@@ -394,7 +429,8 @@ class StatusControlView(discord.ui.View):
     @discord.ui.button(label="복구", style=discord.ButtonStyle.primary, custom_id="status_restore")
     async def restore_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        await update_status_message()
+        await update_status_message(force_new=True)
+        await send_log("관리자 근무확인 현황판 복구 실행")
         await interaction.followup.send("관리자 근무확인 현황판을 복구했습니다.", ephemeral=True)
 
     @discord.ui.button(label="중복 삭제", style=discord.ButtonStyle.secondary, custom_id="status_cleanup_duplicates")
@@ -402,17 +438,24 @@ class StatusControlView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         before_count = len(data["users"])
-        migrated = migrate_legacy_data(data)
+        old_users = dict(data["users"])
+
+        migrated = migrate_legacy_data({
+            "users": old_users,
+            "panel_message_id": data.get("panel_message_id"),
+            "status_message_id": data.get("status_message_id")
+        })
+
         data["users"] = migrated["users"]
         save_data(data)
         await update_status_message()
 
         after_count = len(data["users"])
-        removed = before_count - after_count
+        changed = before_count - after_count
 
-        await send_log(f"중복 삭제 실행됨 / 정리 전 {before_count}개 / 정리 후 {after_count}개")
+        await send_log(f"중복 삭제 실행 / 정리 전 {before_count}개 / 정리 후 {after_count}개 / 병합 {changed}개")
         await interaction.followup.send(
-            f"중복 삭제 완료\n정리 전: {before_count}개\n정리 후: {after_count}개\n삭제/병합: {removed}개",
+            f"중복 삭제 완료\n정리 전: {before_count}개\n정리 후: {after_count}개\n병합/삭제: {changed}개",
             ephemeral=True
         )
 
@@ -452,11 +495,14 @@ async def ensure_panel():
 # =========================
 def get_or_create_user(member: discord.Member):
     uid = str(member.id)
+
     if uid not in data["users"]:
         data["users"][uid] = default_user_entry(uid, member.display_name)
     else:
-        data["users"][uid]["display_name"] = clean_display_name(member.display_name)
-        data["users"][uid]["core_name"] = normalize_core_name(member.display_name)
+        existing = data["users"][uid]
+        existing["display_name"] = clean_display_name(member.display_name)
+        existing["core_name"] = normalize_core_name(member.display_name)
+
     return data["users"][uid]
 
 
@@ -581,7 +627,7 @@ async def force_clock_out(interaction: discord.Interaction, 대상: discord.Memb
         color=discord.Color.orange()
     )
 
-    await send_log(f"{user['display_name']} 퇴근했습니다")
+    await send_log(f"{user['display_name']} 강제퇴근 처리됨")
     await interaction.response.send_message(
         f"강제퇴근 완료: {user['display_name']} / {format_seconds(worked)}",
         ephemeral=True
@@ -594,6 +640,8 @@ async def refresh_status(interaction: discord.Interaction):
         await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
         return
 
+    data["users"] = migrate_legacy_data(data)["users"]
+    save_data(data)
     await update_status_message()
     await interaction.response.send_message("근무현황을 갱신했습니다.", ephemeral=True)
 
@@ -604,6 +652,8 @@ async def refresh_status(interaction: discord.Interaction):
 @tasks.loop(minutes=1)
 async def auto_update_status():
     try:
+        data["users"] = migrate_legacy_data(data)["users"]
+        save_data(data)
         await update_status_message()
     except Exception as e:
         await send_log(f"오류: 상태판 갱신 실패 / {e}")
@@ -622,13 +672,16 @@ async def on_ready():
     except Exception as e:
         print("슬래시 명령어 동기화 오류:", e)
 
+    data["users"] = migrate_legacy_data(data)["users"]
+    save_data(data)
+
     await ensure_panel()
     await update_status_message()
 
     if not auto_update_status.is_running():
         auto_update_status.start()
 
-    await send_log("봇 실행되었습니다")
+    await send_log("🤖 RAON 출퇴근 봇이 정상적으로 실행되었습니다.")
     print(f"로그인 완료: {bot.user}")
 
 
