@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import discord
 from discord.ext import commands, tasks
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "여기에_토큰입력")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN") or "여기에_토큰입력"
 
 GUILD_ID = 1462457099039674498
 
