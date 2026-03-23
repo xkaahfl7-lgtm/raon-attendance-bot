@@ -1,55 +1,48 @@
 {
-    "users": {
-        "1": {
-            "user_id": "1",
-            "display_name": "DEVᆞ볶음",
-            "total_time": 208800,
-            "is_working": true,
-            "last_clock_in": 1774158270
-        },
-        "2": {
-            "user_id": "2",
-            "display_name": "IGᆞ봉식",
-            "total_time": 100800,
-            "is_working": true,
-            "last_clock_in": 1774158270
-        },
-        "3": {
-            "user_id": "3",
-            "display_name": "AMᆞ우진",
-            "total_time": 97200,
-            "is_working": false,
-            "last_clock_in": null
-        },
-        "4": {
-            "user_id": "4",
-            "display_name": "STAFFᆞ백구",
-            "total_time": 61200,
-            "is_working": true,
-            "last_clock_in": 1774158090
-        },
-        "5": {
-            "user_id": "5",
-            "display_name": "STAFFᆞ혁이",
-            "total_time": 39600,
-            "is_working": false,
-            "last_clock_in": null
-        },
-        "6": {
-            "user_id": "6",
-            "display_name": "STAFFᆞ호랭",
-            "total_time": 32400,
-            "is_working": true,
-            "last_clock_in": 1774158210
-        },
-        "7": {
-            "user_id": "7",
-            "display_name": "🚗알루ᅵ차량개발자🚗",
-            "total_time": 10800,
-            "is_working": true,
-            "last_clock_in": 1774158390
-        }
+  "users": {
+    "1": {
+      "user_id": "1",
+      "display_name": "DEVᆞ볶음",
+      "total_time": 280740,
+      "is_working": false,
+      "last_clock_in": null
     },
-    "status_message_id": null,
-    "button_message_id": null
+    "2": {
+      "user_id": "2",
+      "display_name": "IGᆞ봉식",
+      "total_time": 172740,
+      "is_working": false,
+      "last_clock_in": null
+    },
+    "3": {
+      "user_id": "3",
+      "display_name": "AMᆞ우진",
+      "total_time": 197580,
+      "is_working": false,
+      "last_clock_in": null
+    },
+    "5": {
+      "user_id": "5",
+      "display_name": "STAFFᆞ혁이",
+      "total_time": 39600,
+      "is_working": false,
+      "last_clock_in": null
+    },
+    "6": {
+      "user_id": "6",
+      "display_name": "STAFFᆞ호랭",
+      "total_time": 104760,
+      "is_working": false,
+      "last_clock_in": null
+    },
+    "7": {
+      "user_id": "7",
+      "display_name": "🚗알루ᅵ차량개발자🚗",
+      "total_time": 82620,
+      "is_working": false,
+      "last_clock_in": null
+    }
+  },
+  "status_message_id": null,
+  "button_message_id": null
 }
