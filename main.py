@@ -1,41 +1,711 @@
-{
-  "users": {
-    "828979282428428308": {
-      "user_id": "828979282428428308",
-      "display_name": "DEVᆞ볶음",
-      "total_time": 280740,
-      "is_working": false,
-      "last_clock_in": null
-    },
-    "1078221223097536512": {
-      "user_id": "1078221223097536512",
-      "display_name": "IGᆞ봉식",
-      "total_time": 172740,
-      "is_working": false,
-      "last_clock_in": null
-    },
-    "437138732504842250": {
-      "user_id": "437138732504842250",
-      "display_name": "AMᆞ우진",
-      "total_time": 197580,
-      "is_working": false,
-      "last_clock_in": null
-    },
-    "1368783331738783795": {
-      "user_id": "1368783331738783795",
-      "display_name": "STAFFᆞ호랭",
-      "total_time": 104760,
-      "is_working": false,
-      "last_clock_in": null
-    },
-    "1415633121386430495": {
-      "user_id": "1415633121386430495",
-      "display_name": "🚗알루ᅵ차량개발자🚗",
-      "total_time": 82620,
-      "is_working": false,
-      "last_clock_in": null
-    }
-  },
-  "status_message_id": null,
-  "button_message_id": null
+import os
+import json
+import time
+import shutil
+import asyncio
+from typing import Dict, Any, Optional, List, Tuple
+
+import discord
+from discord.ext import commands, tasks
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "여기에_토큰입력")
+
+GUILD_ID = 1462457099039674498
+
+BUTTON_CHANNEL_ID = 1481808025030492180
+RECORD_CHANNEL_ID = 1479035911726563419
+STATUS_CHANNEL_ID = 1479036025820156035
+LOG_CHANNEL_ID = 1479382504204013568
+
+DATA_FILE = "attendance_data.json"
+DATA_BACKUP_FILE = "attendance_data.backup.json"
+
+BOT_PREFIX = "!"
+STATUS_UPDATE_INTERVAL = 60
+
+EMBED_COLOR_CLOCK_IN = 0x2ECC71
+EMBED_COLOR_CLOCK_OUT = 0xE74C3C
+EMBED_COLOR_STATUS = 0x3498DB
+EMBED_COLOR_BUTTON = 0x5865F2
+
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+
+data_lock = asyncio.Lock()
+
+attendance_data: Dict[str, Any] = {
+    "users": {},
+    "status_message_id": None,
+    "button_message_id": None
 }
+
+
+def now_ts() -> int:
+    return int(time.time())
+
+
+def ensure_data_shape(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+
+    raw.setdefault("users", {})
+    raw.setdefault("status_message_id", None)
+    raw.setdefault("button_message_id", None)
+
+    if not isinstance(raw["users"], dict):
+        raw["users"] = {}
+
+    fixed_users = {}
+    for uid, user in raw["users"].items():
+        uid = str(uid)
+        if not isinstance(user, dict):
+            continue
+
+        total_time = user.get("total_time", 0)
+        is_working = bool(user.get("is_working", False))
+        last_clock_in = user.get("last_clock_in", None)
+
+        try:
+            total_time = int(total_time)
+        except Exception:
+            total_time = 0
+
+        if last_clock_in is not None:
+            try:
+                last_clock_in = int(last_clock_in)
+            except Exception:
+                last_clock_in = None
+                is_working = False
+
+        fixed_users[uid] = {
+            "user_id": uid,
+            "display_name": str(user.get("display_name", f"USER-{uid}")),
+            "total_time": total_time,
+            "is_working": is_working,
+            "last_clock_in": last_clock_in
+        }
+
+    raw["users"] = fixed_users
+    return raw
+
+
+def save_data(data: Dict[str, Any]) -> None:
+    temp_file = f"{DATA_FILE}.tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    if os.path.exists(DATA_FILE):
+        shutil.copyfile(DATA_FILE, DATA_BACKUP_FILE)
+
+    os.replace(temp_file, DATA_FILE)
+
+
+def load_data() -> Dict[str, Any]:
+    if not os.path.exists(DATA_FILE):
+        fresh = {
+            "users": {},
+            "status_message_id": None,
+            "button_message_id": None
+        }
+        save_data(fresh)
+        return fresh
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return ensure_data_shape(raw)
+    except Exception:
+        if os.path.exists(DATA_BACKUP_FILE):
+            try:
+                with open(DATA_BACKUP_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                fixed = ensure_data_shape(raw)
+                save_data(fixed)
+                return fixed
+            except Exception:
+                pass
+
+        fresh = {
+            "users": {},
+            "status_message_id": None,
+            "button_message_id": None
+        }
+        save_data(fresh)
+        return fresh
+
+
+def format_seconds(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return f"{h}시간 {m:02d}분"
+
+
+def is_admin(member: discord.Member) -> bool:
+    return member.guild_permissions.administrator
+
+
+def normalize_name(name: str) -> str:
+    if not name:
+        return ""
+    return (
+        name.replace("ㆍ", "ᆞ")
+        .replace("·", "ᆞ")
+        .replace("•", "ᆞ")
+        .replace(" ", "")
+        .strip()
+        .lower()
+    )
+
+
+def get_user_record(member: discord.Member) -> Dict[str, Any]:
+    uid = str(member.id)
+
+    if uid not in attendance_data["users"]:
+        attendance_data["users"][uid] = {
+            "user_id": uid,
+            "display_name": member.display_name,
+            "total_time": 0,
+            "is_working": False,
+            "last_clock_in": None
+        }
+    else:
+        attendance_data["users"][uid]["display_name"] = member.display_name
+
+    return attendance_data["users"][uid]
+
+
+async def send_log(message: str) -> None:
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if isinstance(channel, discord.TextChannel):
+        try:
+            await channel.send(message)
+        except Exception:
+            pass
+
+
+def build_clock_embed(is_clock_in: bool, member: discord.Member, ts: int, elapsed: Optional[int] = None) -> discord.Embed:
+    title = "🟢 출근" if is_clock_in else "🔴 퇴근"
+    color = EMBED_COLOR_CLOCK_IN if is_clock_in else EMBED_COLOR_CLOCK_OUT
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+    desc = (
+        f"## {title}\n\n"
+        f"**관리자**\n{member.mention}\n\n"
+        f"**시간**\n{time_str}"
+    )
+
+    if elapsed is not None:
+        desc += f"\n\n**근무시간**\n{format_seconds(elapsed)}"
+
+    embed = discord.Embed(description=desc, color=color)
+    return embed
+
+
+def get_current_workers(guild: discord.Guild) -> List[Tuple[str, int]]:
+    result = []
+
+    for uid, user in attendance_data["users"].items():
+        if user.get("is_working") and user.get("last_clock_in") is not None:
+            elapsed = max(0, now_ts() - int(user["last_clock_in"]))
+            member = guild.get_member(int(uid))
+            display_name = member.display_name if member else user.get("display_name", uid)
+            result.append((display_name, elapsed))
+
+    result.sort(key=lambda x: x[1], reverse=True)
+    return result
+
+
+def get_ranking(guild: discord.Guild) -> List[Tuple[str, int]]:
+    result = []
+
+    for uid, user in attendance_data["users"].items():
+        total_time = int(user.get("total_time", 0) or 0)
+        member = guild.get_member(int(uid))
+        display_name = member.display_name if member else user.get("display_name", uid)
+        result.append((display_name, total_time))
+
+    result.sort(key=lambda x: x[1], reverse=True)
+    return result
+
+
+def build_status_embed(guild: discord.Guild) -> discord.Embed:
+    current_workers = get_current_workers(guild)
+    ranking = get_ranking(guild)
+
+    if current_workers:
+        current_text = "\n".join(
+            f"{name} - {format_seconds(elapsed)}"
+            for name, elapsed in current_workers
+        )
+    else:
+        current_text = "없음"
+
+    if ranking:
+        ranking_text = "\n".join(
+            f"{idx}위 {name} - {format_seconds(total)}"
+            for idx, (name, total) in enumerate(ranking[:10], start=1)
+        )
+    else:
+        ranking_text = "데이터 없음"
+
+    embed = discord.Embed(
+        description=(
+            f"## 📊 관리자 근무확인\n\n"
+            f"### 🟢 현재 근무중\n"
+            f"{current_text}\n\n"
+            f"### 🏆 근무랭킹\n"
+            f"{ranking_text}"
+        ),
+        color=EMBED_COLOR_STATUS
+    )
+    return embed
+
+
+async def get_or_create_button_message(channel: discord.TextChannel) -> discord.Message:
+    msg_id = attendance_data.get("button_message_id")
+
+    if msg_id:
+        try:
+            return await channel.fetch_message(int(msg_id))
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        description="## 🕒 RAON 관리자 출퇴근\n\n아래 버튼으로 출근 / 퇴근을 진행하세요.",
+        color=EMBED_COLOR_BUTTON
+    )
+    msg = await channel.send(embed=embed, view=AttendanceView())
+    attendance_data["button_message_id"] = msg.id
+    save_data(attendance_data)
+    return msg
+
+
+async def get_or_create_status_message(channel: discord.TextChannel, guild: discord.Guild) -> discord.Message:
+    msg_id = attendance_data.get("status_message_id")
+
+    if msg_id:
+        try:
+            return await channel.fetch_message(int(msg_id))
+        except Exception:
+            pass
+
+    embed = build_status_embed(guild)
+    msg = await channel.send(embed=embed, view=StatusView())
+    attendance_data["status_message_id"] = msg.id
+    save_data(attendance_data)
+    return msg
+
+
+async def refresh_status_message(guild: discord.Guild) -> None:
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    try:
+        msg = await get_or_create_status_message(channel, guild)
+        await msg.edit(embed=build_status_embed(guild), view=StatusView())
+    except Exception as e:
+        await send_log(f"❌ 상태메시지 갱신 오류: {e}")
+
+
+async def rebuild_messages(guild: discord.Guild) -> None:
+    button_channel = bot.get_channel(BUTTON_CHANNEL_ID)
+    status_channel = bot.get_channel(STATUS_CHANNEL_ID)
+
+    if isinstance(button_channel, discord.TextChannel):
+        attendance_data["button_message_id"] = None
+        save_data(attendance_data)
+        await get_or_create_button_message(button_channel)
+
+    if isinstance(status_channel, discord.TextChannel):
+        attendance_data["status_message_id"] = None
+        save_data(attendance_data)
+        await get_or_create_status_message(status_channel, guild)
+
+
+def cleanup_invalid_working_states() -> int:
+    fixed = 0
+
+    for user in attendance_data["users"].values():
+        if user.get("is_working") and user.get("last_clock_in") is None:
+            user["is_working"] = False
+            fixed += 1
+
+        if not user.get("is_working") and user.get("last_clock_in") is not None:
+            user["last_clock_in"] = None
+            fixed += 1
+
+    return fixed
+
+
+def merge_duplicate_names() -> int:
+    users = attendance_data["users"]
+    grouped: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+
+    for uid, user in list(users.items()):
+        key = normalize_name(user.get("display_name", ""))
+        grouped.setdefault(key, []).append((uid, user))
+
+    changed = 0
+
+    for _, entries in grouped.items():
+        if len(entries) <= 1:
+            continue
+
+        keep_uid, keep_user = entries[0]
+
+        for uid, user in entries[1:]:
+            keep_user["total_time"] = int(keep_user.get("total_time", 0)) + int(user.get("total_time", 0))
+
+            keep_working = bool(keep_user.get("is_working"))
+            user_working = bool(user.get("is_working"))
+
+            if not keep_working and user_working:
+                keep_user["is_working"] = True
+                keep_user["last_clock_in"] = user.get("last_clock_in")
+                keep_user["display_name"] = user.get("display_name", keep_user.get("display_name"))
+
+            elif keep_working and user_working:
+                keep_clock = keep_user.get("last_clock_in")
+                user_clock = user.get("last_clock_in")
+
+                if keep_clock is None and user_clock is not None:
+                    keep_user["last_clock_in"] = user_clock
+                elif keep_clock is not None and user_clock is not None:
+                    keep_user["last_clock_in"] = min(int(keep_clock), int(user_clock))
+
+            users.pop(uid, None)
+            changed += 1
+
+    return changed
+
+
+def force_clock_out_user(member: discord.Member) -> Tuple[bool, str]:
+    uid = str(member.id)
+    user = attendance_data["users"].get(uid)
+
+    if not user:
+        return False, "해당 유저 데이터가 없습니다."
+
+    if not user.get("is_working"):
+        return False, "현재 근무중이 아닙니다."
+
+    clock_in = user.get("last_clock_in")
+    if clock_in is None:
+        user["is_working"] = False
+        user["last_clock_in"] = None
+        return True, "근무 상태만 해제했습니다."
+
+    elapsed = max(0, now_ts() - int(clock_in))
+    user["total_time"] = int(user.get("total_time", 0)) + elapsed
+    user["is_working"] = False
+    user["last_clock_in"] = None
+
+    return True, f"강제퇴근 완료 (+{format_seconds(elapsed)})"
+
+
+async def send_record_log(is_clock_in: bool, member: discord.Member, ts: int, elapsed: Optional[int] = None) -> None:
+    channel = bot.get_channel(RECORD_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    embed = build_clock_embed(is_clock_in, member, ts, elapsed)
+    await channel.send(embed=embed)
+
+
+class AttendanceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="출근", style=discord.ButtonStyle.success, custom_id="raon_clock_in")
+    async def clock_in_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        member = interaction.user
+
+        async with data_lock:
+            user = get_user_record(member)
+
+            if user.get("is_working"):
+                await interaction.response.send_message("이미 출근 중입니다.", ephemeral=True)
+                return
+
+            ts = now_ts()
+            user["display_name"] = member.display_name
+            user["is_working"] = True
+            user["last_clock_in"] = ts
+            save_data(attendance_data)
+
+        await send_record_log(True, member, ts)
+        await refresh_status_message(interaction.guild)
+        await send_log(f"✅ 출근 완료: {member} ({member.id})")
+        await interaction.response.send_message("출근 처리되었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="퇴근", style=discord.ButtonStyle.danger, custom_id="raon_clock_out")
+    async def clock_out_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        member = interaction.user
+
+        async with data_lock:
+            user = get_user_record(member)
+
+            if not user.get("is_working"):
+                await interaction.response.send_message("현재 출근 중이 아닙니다.", ephemeral=True)
+                return
+
+            clock_in = user.get("last_clock_in")
+            if clock_in is None:
+                user["is_working"] = False
+                user["last_clock_in"] = None
+                save_data(attendance_data)
+                await interaction.response.send_message("데이터가 꼬여 근무상태만 해제했습니다.", ephemeral=True)
+                await refresh_status_message(interaction.guild)
+                await send_log(f"⚠️ 퇴근 오류 복구: {member} ({member.id})")
+                return
+
+            ts = now_ts()
+            elapsed = max(0, ts - int(clock_in))
+
+            user["total_time"] = int(user.get("total_time", 0)) + elapsed
+            user["display_name"] = member.display_name
+            user["is_working"] = False
+            user["last_clock_in"] = None
+            save_data(attendance_data)
+
+        await send_record_log(False, member, ts, elapsed)
+        await refresh_status_message(interaction.guild)
+        await send_log(f"✅ 퇴근 완료: {member} ({member.id}) / +{format_seconds(elapsed)}")
+        await interaction.response.send_message(
+            f"퇴근 처리되었습니다. 이번 근무시간: {format_seconds(elapsed)}",
+            ephemeral=True
+        )
+
+
+class StatusView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="현황갱신", style=discord.ButtonStyle.primary, custom_id="raon_status_refresh")
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        await refresh_status_message(interaction.guild)
+        await interaction.response.send_message("근무 현황을 갱신했습니다.", ephemeral=True)
+
+    @discord.ui.button(label="복구", style=discord.ButtonStyle.secondary, custom_id="raon_status_rebuild")
+    async def rebuild_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        async with data_lock:
+            fixed = cleanup_invalid_working_states()
+            attendance_data["button_message_id"] = None
+            attendance_data["status_message_id"] = None
+            save_data(attendance_data)
+
+        await rebuild_messages(interaction.guild)
+        await refresh_status_message(interaction.guild)
+        await send_log(f"🛠️ 복구 실행: {interaction.user} ({interaction.user.id}) / 상태수정 {fixed}건")
+        await interaction.response.send_message("복구 완료되었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="중복삭제", style=discord.ButtonStyle.secondary, custom_id="raon_status_cleanup")
+    async def cleanup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        async with data_lock:
+            merged = merge_duplicate_names()
+            fixed = cleanup_invalid_working_states()
+            save_data(attendance_data)
+
+        await refresh_status_message(interaction.guild)
+        await send_log(
+            f"🧹 중복삭제 실행: {interaction.user} ({interaction.user.id}) / 중복병합 {merged}건 / 상태수정 {fixed}건"
+        )
+        await interaction.response.send_message(
+            f"중복삭제 완료: 병합 {merged}건 / 상태수정 {fixed}건",
+            ephemeral=True
+        )
+
+
+@bot.command(name="강제퇴근")
+@commands.guild_only()
+async def force_clock_out_command(ctx: commands.Context, member: Optional[discord.Member] = None):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    if member is None:
+        await ctx.reply("사용법: `!강제퇴근 @유저`")
+        return
+
+    async with data_lock:
+        ok, msg = force_clock_out_user(member)
+        save_data(attendance_data)
+
+    await refresh_status_message(ctx.guild)
+    await send_log(f"🛑 강제퇴근: {ctx.author} -> {member} / {msg}")
+    await ctx.reply(f"{member.mention} {msg}")
+
+
+@bot.command(name="현황갱신")
+@commands.guild_only()
+async def refresh_status_command(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    await refresh_status_message(ctx.guild)
+    await ctx.reply("근무 현황을 갱신했습니다.")
+
+
+@bot.command(name="복구")
+@commands.guild_only()
+async def rebuild_command(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    async with data_lock:
+        fixed = cleanup_invalid_working_states()
+        attendance_data["button_message_id"] = None
+        attendance_data["status_message_id"] = None
+        save_data(attendance_data)
+
+    await rebuild_messages(ctx.guild)
+    await refresh_status_message(ctx.guild)
+    await send_log(f"🛠️ 명령어 복구 실행: {ctx.author} ({ctx.author.id}) / 상태수정 {fixed}건")
+    await ctx.reply("복구 완료되었습니다.")
+
+
+@bot.command(name="중복삭제")
+@commands.guild_only()
+async def cleanup_command(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    async with data_lock:
+        merged = merge_duplicate_names()
+        fixed = cleanup_invalid_working_states()
+        save_data(attendance_data)
+
+    await refresh_status_message(ctx.guild)
+    await send_log(f"🧹 명령어 중복삭제 실행: {ctx.author} ({ctx.author.id}) / 병합 {merged}건 / 상태수정 {fixed}건")
+    await ctx.reply(f"중복삭제 완료: 병합 {merged}건 / 상태수정 {fixed}건")
+
+
+@bot.command(name="근무초기화")
+@commands.guild_only()
+async def reset_working_command(ctx: commands.Context):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    count = 0
+
+    async with data_lock:
+        for user in attendance_data["users"].values():
+            if user.get("is_working"):
+                user["is_working"] = False
+                user["last_clock_in"] = None
+                count += 1
+        save_data(attendance_data)
+
+    await refresh_status_message(ctx.guild)
+    await send_log(f"🚨 근무초기화 실행: {ctx.author} ({ctx.author.id}) / {count}명 해제")
+    await ctx.reply(f"현재 근무중 상태 {count}명을 해제했습니다.")
+
+
+@bot.event
+async def setup_hook():
+    bot.add_view(AttendanceView())
+    bot.add_view(StatusView())
+
+
+@bot.event
+async def on_ready():
+    global attendance_data
+    attendance_data = load_data()
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        print("지정한 GUILD_ID의 서버를 찾지 못했습니다.")
+        return
+
+    async with data_lock:
+        cleanup_invalid_working_states()
+        save_data(attendance_data)
+
+    await rebuild_messages(guild)
+    await refresh_status_message(guild)
+
+    if not auto_status_updater.is_running():
+        auto_status_updater.start()
+
+    print(f"Logged in as {bot.user} ({bot.user.id})")
+    await send_log("🤖 RAON 출퇴근 봇이 정상적으로 실행되었습니다.")
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: Exception):
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    await send_log(f"❌ 명령어 오류: {type(error).__name__} / {error}")
+    try:
+        await ctx.reply(f"오류가 발생했습니다: {error}")
+    except Exception:
+        pass
+
+
+@tasks.loop(seconds=STATUS_UPDATE_INTERVAL)
+async def auto_status_updater():
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+
+    try:
+        await refresh_status_message(guild)
+    except Exception as e:
+        await send_log(f"❌ 자동 현황갱신 오류: {e}")
+
+
+@auto_status_updater.before_loop
+async def before_auto_status_updater():
+    await bot.wait_until_ready()
+
+
+if __name__ == "__main__":
+    if DISCORD_TOKEN == "여기에_토큰입력":
+        print("DISCORD_TOKEN을 입력하거나 환경변수로 설정해주세요.")
+    else:
+        bot.run(DISCORD_TOKEN)
