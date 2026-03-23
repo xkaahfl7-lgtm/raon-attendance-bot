@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import discord
 from discord.ext import commands, tasks
 
+
 # =========================
 # 설정
 # =========================
