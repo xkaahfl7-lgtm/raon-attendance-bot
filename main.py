@@ -8,7 +8,10 @@ from typing import Dict, Any, Optional, List, Tuple
 import discord
 from discord.ext import commands, tasks
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN") or "여기에_토큰입력"
+# =========================
+# 설정
+# =========================
+TOKEN = os.getenv("TOKEN")
 
 GUILD_ID = 1462457099039674498
 
@@ -44,6 +47,9 @@ attendance_data: Dict[str, Any] = {
 }
 
 
+# =========================
+# 기본 함수
+# =========================
 def now_ts() -> int:
     return int(time.time())
 
@@ -190,6 +196,9 @@ async def send_log(message: str) -> None:
             pass
 
 
+# =========================
+# 임베드
+# =========================
 def build_clock_embed(is_clock_in: bool, member: discord.Member, ts: int, elapsed: Optional[int] = None) -> discord.Embed:
     title = "🟢 출근" if is_clock_in else "🔴 퇴근"
     color = EMBED_COLOR_CLOCK_IN if is_clock_in else EMBED_COLOR_CLOCK_OUT
@@ -268,6 +277,9 @@ def build_status_embed(guild: discord.Guild) -> discord.Embed:
     return embed
 
 
+# =========================
+# 메시지 관리
+# =========================
 async def get_or_create_button_message(channel: discord.TextChannel) -> discord.Message:
     msg_id = attendance_data.get("button_message_id")
 
@@ -330,6 +342,9 @@ async def rebuild_messages(guild: discord.Guild) -> None:
         await get_or_create_status_message(status_channel, guild)
 
 
+# =========================
+# 데이터 복구 / 정리
+# =========================
 def cleanup_invalid_working_states() -> int:
     fixed = 0
 
@@ -411,6 +426,9 @@ def force_clock_out_user(member: discord.Member) -> Tuple[bool, str]:
     return True, f"강제퇴근 완료 (+{format_seconds(elapsed)})"
 
 
+# =========================
+# 기록 전송
+# =========================
 async def send_record_log(is_clock_in: bool, member: discord.Member, ts: int, elapsed: Optional[int] = None) -> None:
     channel = bot.get_channel(RECORD_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
@@ -420,6 +438,9 @@ async def send_record_log(is_clock_in: bool, member: discord.Member, ts: int, el
     await channel.send(embed=embed)
 
 
+# =========================
+# 버튼
+# =========================
 class AttendanceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -556,6 +577,9 @@ class StatusView(discord.ui.View):
         )
 
 
+# =========================
+# 명령어
+# =========================
 @bot.command(name="강제퇴근")
 @commands.guild_only()
 async def force_clock_out_command(ctx: commands.Context, member: Optional[discord.Member] = None):
@@ -645,6 +669,9 @@ async def reset_working_command(ctx: commands.Context):
     await ctx.reply(f"현재 근무중 상태 {count}명을 해제했습니다.")
 
 
+# =========================
+# 이벤트
+# =========================
 @bot.event
 async def setup_hook():
     bot.add_view(AttendanceView())
@@ -687,6 +714,9 @@ async def on_command_error(ctx: commands.Context, error: Exception):
         pass
 
 
+# =========================
+# 자동 갱신
+# =========================
 @tasks.loop(seconds=STATUS_UPDATE_INTERVAL)
 async def auto_status_updater():
     guild = bot.get_guild(GUILD_ID)
@@ -704,8 +734,11 @@ async def before_auto_status_updater():
     await bot.wait_until_ready()
 
 
+# =========================
+# 실행
+# =========================
 if __name__ == "__main__":
-    if DISCORD_TOKEN == "여기에_토큰입력":
-        print("DISCORD_TOKEN을 입력하거나 환경변수로 설정해주세요.")
+    if not TOKEN:
+        print("TOKEN을 입력하거나 환경변수로 설정해주세요.")
     else:
-        bot.run(DISCORD_TOKEN)
+        bot.run(TOKEN)
