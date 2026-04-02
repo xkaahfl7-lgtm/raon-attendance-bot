@@ -17,6 +17,7 @@ from discord import app_commands
 TOKEN = os.getenv("TOKEN")
 
 GUILD_ID = 1462457099039674498
+GUILD_OBJ = discord.Object(id=GUILD_ID)
 
 BUTTON_CHANNEL_ID = 1481808025030492180
 RECORD_CHANNEL_ID = 1479035911726563419
@@ -232,20 +233,17 @@ def parse_time_to_seconds(text: str) -> Optional[int]:
 def find_user_by_display_name(name: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     target = normalize_name(name)
 
-    # 완전일치 우선
     for uid, user in attendance_data["users"].items():
         display_name = str(user.get("display_name", ""))
         if normalize_name(display_name) == target:
             return uid, user
 
-    # 접두사 제거 후 비교
     for uid, user in attendance_data["users"].items():
         display_name = str(user.get("display_name", ""))
         compare_name = display_name.split("ᆞ")[-1]
         if normalize_name(compare_name) == target:
             return uid, user
 
-    # 부분일치 허용
     for uid, user in attendance_data["users"].items():
         display_name = str(user.get("display_name", ""))
         if target and target in normalize_name(display_name):
@@ -277,6 +275,19 @@ def normalize_role_label(role_text: str) -> Optional[str]:
 
 def make_manual_user_key(nickname: str) -> str:
     return f"manual_{normalize_name(nickname)}"
+
+
+def remove_user_by_display_name(name: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    found = find_user_by_display_name(name)
+    if not found:
+        return None
+
+    uid, user = found
+    removed = attendance_data["users"].pop(uid, None)
+    if removed is None:
+        return None
+
+    return uid, removed
 
 
 async def send_log(message: str) -> None:
@@ -313,8 +324,7 @@ def build_clock_embed(is_clock_in: bool, member: discord.Member, ts: int, elapse
     if elapsed is not None:
         desc += f"\n\n**근무시간**\n{format_seconds(elapsed)}"
 
-    embed = discord.Embed(description=desc, color=color)
-    return embed
+    return discord.Embed(description=desc, color=color)
 
 
 def get_current_workers(guild: discord.Guild) -> List[Tuple[str, int]]:
@@ -364,7 +374,7 @@ def build_status_embed(guild: discord.Guild) -> discord.Embed:
     else:
         ranking_text = "데이터 없음"
 
-    embed = discord.Embed(
+    return discord.Embed(
         description=(
             f"## 📊 관리자 근무확인\n\n"
             f"### 🟢 현재 근무중\n"
@@ -374,7 +384,6 @@ def build_status_embed(guild: discord.Guild) -> discord.Embed:
         ),
         color=EMBED_COLOR_STATUS
     )
-    return embed
 
 
 # =========================
@@ -711,7 +720,7 @@ class StatusView(discord.ui.View):
 # =========================
 # 슬래시 명령어
 # =========================
-@bot.tree.command(name="추가", description="관리자/스태프를 수동 추가하거나 직급을 변경합니다")
+@bot.tree.command(name="추가", description="관리자/스태프를 수동 추가하거나 직급을 변경합니다", guild=GUILD_OBJ)
 @app_commands.describe(nickname="닉네임", role="직급 예: STAFF, AM, 뉴비도우미, GM, DGM, IG, DEV")
 async def slash_add_staff(interaction: discord.Interaction, nickname: str, role: str):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -745,7 +754,7 @@ async def slash_add_staff(interaction: discord.Interaction, nickname: str, role:
     )
 
 
-@bot.tree.command(name="시간추가", description="닉네임 기준으로 시간을 추가합니다")
+@bot.tree.command(name="시간추가", description="닉네임 기준으로 시간을 추가합니다", guild=GUILD_OBJ)
 @app_commands.describe(nickname="닉네임", amount="예: 1시간, 30분, 45초")
 async def slash_add_time(interaction: discord.Interaction, nickname: str, amount: str):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -787,7 +796,7 @@ async def slash_add_time(interaction: discord.Interaction, nickname: str, amount
     )
 
 
-@bot.tree.command(name="시간삭제", description="닉네임 기준으로 시간을 차감합니다")
+@bot.tree.command(name="시간삭제", description="닉네임 기준으로 시간을 차감합니다", guild=GUILD_OBJ)
 @app_commands.describe(nickname="닉네임", amount="예: 1시간, 30분, 45초")
 async def slash_delete_time(interaction: discord.Interaction, nickname: str, amount: str):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -829,7 +838,7 @@ async def slash_delete_time(interaction: discord.Interaction, nickname: str, amo
     )
 
 
-@bot.tree.command(name="강제퇴근", description="선택한 유저를 강제퇴근 처리합니다")
+@bot.tree.command(name="강제퇴근", description="선택한 유저를 강제퇴근 처리합니다", guild=GUILD_OBJ)
 @app_commands.describe(member="강제퇴근할 유저")
 async def slash_force_clock_out(interaction: discord.Interaction, member: discord.Member):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -849,7 +858,38 @@ async def slash_force_clock_out(interaction: discord.Interaction, member: discor
     await interaction.response.send_message(f"{member.display_name} / {msg}", ephemeral=True)
 
 
-@bot.tree.command(name="현황갱신", description="근무 현황판을 갱신합니다")
+@bot.tree.command(name="퇴사", description="닉네임 기준으로 퇴사 처리하여 목록에서 완전히 제거합니다", guild=GUILD_OBJ)
+@app_commands.describe(nickname="퇴사 처리할 닉네임")
+async def slash_remove_staff(interaction: discord.Interaction, nickname: str):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    async with data_lock:
+        removed = remove_user_by_display_name(nickname)
+        if not removed:
+            await interaction.response.send_message(f"`{nickname}` 닉네임을 찾지 못했습니다.", ephemeral=True)
+            return
+
+        uid, user = removed
+        save_data(attendance_data)
+
+    await refresh_status_message(interaction.guild)
+    await send_log(
+        f"🚪 퇴사처리: {member_log_name(interaction.user)} / "
+        f"{user.get('display_name', uid)} 삭제 완료"
+    )
+    await interaction.response.send_message(
+        f"{user.get('display_name', uid)} 퇴사 처리 완료",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="현황갱신", description="근무 현황판을 갱신합니다", guild=GUILD_OBJ)
 async def slash_refresh_status(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
@@ -864,7 +904,7 @@ async def slash_refresh_status(interaction: discord.Interaction):
     await interaction.response.send_message("근무 현황을 갱신했습니다.", ephemeral=True)
 
 
-@bot.tree.command(name="근무초기화", description="현재 근무중 상태를 전부 해제합니다")
+@bot.tree.command(name="근무초기화", description="현재 근무중 상태를 전부 해제합니다", guild=GUILD_OBJ)
 async def slash_reset_working(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
@@ -892,17 +932,18 @@ async def slash_reset_working(interaction: discord.Interaction):
 # =========================
 # 이벤트
 # =========================
+async def sync_commands():
+    try:
+        synced = await bot.tree.sync(guild=GUILD_OBJ)
+        await send_log(f"✅ 슬래시 명령어 동기화 완료: {len(synced)}개")
+    except Exception as e:
+        await send_log(f"❌ 슬래시 명령어 동기화 실패: {type(e).__name__} / {e}")
+
+
 @bot.event
 async def setup_hook():
     bot.add_view(AttendanceView())
     bot.add_view(StatusView())
-
-    guild_obj = discord.Object(id=GUILD_ID)
-    try:
-        synced = await bot.tree.sync(guild=guild_obj)
-        print(f"슬래시 명령어 동기화 완료: {len(synced)}개")
-    except Exception as e:
-        print(f"슬래시 명령어 동기화 실패: {e}")
 
 
 @bot.event
@@ -921,13 +962,7 @@ async def on_ready():
 
     await rebuild_messages(guild)
     await refresh_status_message(guild)
-
-    guild_obj = discord.Object(id=GUILD_ID)
-    try:
-        synced = await bot.tree.sync(guild=guild_obj)
-        await send_log(f"✅ 슬래시 명령어 동기화 완료: {len(synced)}개")
-    except Exception as e:
-        await send_log(f"❌ 슬래시 명령어 동기화 실패: {type(e).__name__} / {e}")
+    await sync_commands()
 
     if not auto_status_updater.is_running():
         auto_status_updater.start()
