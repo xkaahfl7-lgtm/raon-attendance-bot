@@ -150,6 +150,7 @@ def load_data() -> Dict[str, Any]:
 def format_seconds(seconds: int) -> str:
     if seconds < 0:
         seconds = 0
+
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
@@ -223,11 +224,13 @@ def parse_time_to_seconds(text: str) -> Optional[int]:
 def find_user_by_display_name(name: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     target = normalize_name(name)
 
+    # 완전일치 우선
     for uid, user in attendance_data["users"].items():
         display_name = str(user.get("display_name", ""))
         if normalize_name(display_name) == target:
             return uid, user
 
+    # 부분일치 허용
     for uid, user in attendance_data["users"].items():
         display_name = str(user.get("display_name", ""))
         if target and target in normalize_name(display_name):
@@ -735,6 +738,47 @@ async def reset_working_command(ctx: commands.Context):
     await refresh_status_message(ctx.guild)
     await send_log(f"🚨 근무초기화 실행: {member_log_name(ctx.author)} / {count}명 해제")
     await ctx.reply(f"현재 근무중 상태 {count}명을 해제했습니다.")
+
+
+@bot.command(name="추가")
+@commands.guild_only()
+async def add_time_command(ctx: commands.Context, nickname: Optional[str] = None, amount: Optional[str] = None):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    if not nickname or not amount:
+        await ctx.reply("사용법: `!추가 우진 1시간` 또는 `!추가 볶음 30분`")
+        return
+
+    seconds = parse_time_to_seconds(amount)
+    if seconds is None:
+        await ctx.reply("시간 형식이 올바르지 않습니다. 예: `1시간`, `30분`, `45초`")
+        return
+
+    async with data_lock:
+        found = find_user_by_display_name(nickname)
+        if not found:
+            await ctx.reply(f"`{nickname}` 닉네임을 찾지 못했습니다.")
+            return
+
+        uid, user = found
+        before = int(user.get("total_time", 0))
+        user["total_time"] = before + seconds
+        after = int(user["total_time"])
+        save_data(attendance_data)
+
+    await refresh_status_message(ctx.guild)
+    await send_log(
+        f"➕ 시간추가: {member_log_name(ctx.author)} / "
+        f"{user.get('display_name', uid)} / 추가 {format_seconds(seconds)} / "
+        f"변경 {format_seconds(before)} -> {format_seconds(after)}"
+    )
+    await ctx.reply(
+        f"{user.get('display_name', uid)} 시간 추가 완료\n"
+        f"- 추가: {format_seconds(seconds)}\n"
+        f"- 변경 후: {format_seconds(after)}"
+    )
 
 
 @bot.command(name="삭제")
