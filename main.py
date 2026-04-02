@@ -1,9 +1,9 @@
 import os
-
 import json
 import time
 import shutil
 import asyncio
+import traceback
 from typing import Dict, Any, Optional, List, Tuple
 
 import discord
@@ -26,7 +26,7 @@ DATA_FILE = "attendance_data.json"
 DATA_BACKUP_FILE = "attendance_data.backup.json"
 
 BOT_PREFIX = "!"
-STATUS_UPDATE_INTERVAL = 60
+STATUS_UPDATE_INTERVAL = 120
 
 EMBED_COLOR_CLOCK_IN = 0x2ECC71
 EMBED_COLOR_CLOCK_OUT = 0xE74C3C
@@ -152,7 +152,13 @@ def format_seconds(seconds: int) -> str:
         seconds = 0
     h = seconds // 3600
     m = (seconds % 3600) // 60
-    return f"{h}시간 {m:02d}분"
+    s = seconds % 60
+
+    if h > 0:
+        return f"{h}시간 {m:02d}분"
+    if m > 0:
+        return f"{m}분 {s:02d}초"
+    return f"{s}초"
 
 
 def is_admin(member: discord.Member) -> bool:
@@ -172,6 +178,10 @@ def normalize_name(name: str) -> str:
     )
 
 
+def member_log_name(member: discord.Member) -> str:
+    return f"{member.display_name} ({member.id})"
+
+
 def get_user_record(member: discord.Member) -> Dict[str, Any]:
     uid = str(member.id)
 
@@ -189,13 +199,58 @@ def get_user_record(member: discord.Member) -> Dict[str, Any]:
     return attendance_data["users"][uid]
 
 
+def parse_time_to_seconds(text: str) -> Optional[int]:
+    text = str(text).strip().lower()
+
+    if text.endswith("시간"):
+        num = text[:-2].strip()
+        if num.isdigit():
+            return int(num) * 3600
+
+    if text.endswith("분"):
+        num = text[:-1].strip()
+        if num.isdigit():
+            return int(num) * 60
+
+    if text.endswith("초"):
+        num = text[:-1].strip()
+        if num.isdigit():
+            return int(num)
+
+    return None
+
+
+def find_user_by_display_name(name: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    target = normalize_name(name)
+
+    for uid, user in attendance_data["users"].items():
+        display_name = str(user.get("display_name", ""))
+        if normalize_name(display_name) == target:
+            return uid, user
+
+    for uid, user in attendance_data["users"].items():
+        display_name = str(user.get("display_name", ""))
+        if target and target in normalize_name(display_name):
+            return uid, user
+
+    return None
+
+
 async def send_log(message: str) -> None:
     channel = bot.get_channel(LOG_CHANNEL_ID)
-    if isinstance(channel, discord.TextChannel):
-        try:
+    if not isinstance(channel, discord.TextChannel):
+        print(f"[LOG CHANNEL ERROR] {message}")
+        return
+
+    try:
+        if len(message) <= 1900:
             await channel.send(message)
-        except Exception:
-            pass
+        else:
+            for i in range(0, len(message), 1900):
+                await channel.send(message[i:i + 1900])
+    except Exception as e:
+        print(f"[SEND LOG ERROR] {type(e).__name__}: {e}")
+        print(message)
 
 
 # =========================
@@ -320,13 +375,17 @@ async def get_or_create_status_message(channel: discord.TextChannel, guild: disc
 async def refresh_status_message(guild: discord.Guild) -> None:
     channel = bot.get_channel(STATUS_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
+        await send_log("❌ 상태메시지 갱신 실패: STATUS_CHANNEL_ID 채널을 찾지 못했습니다.")
         return
 
     try:
         msg = await get_or_create_status_message(channel, guild)
         await msg.edit(embed=build_status_embed(guild), view=StatusView())
     except Exception as e:
-        await send_log(f"❌ 상태메시지 갱신 오류: {e}")
+        error_text = traceback.format_exc()
+        await send_log(
+            f"❌ 상태메시지 갱신 오류: {type(e).__name__} / {e}\n```py\n{error_text[:1500]}\n```"
+        )
 
 
 async def rebuild_messages(guild: discord.Guild) -> None:
@@ -434,10 +493,17 @@ def force_clock_out_user(member: discord.Member) -> Tuple[bool, str]:
 async def send_record_log(is_clock_in: bool, member: discord.Member, ts: int, elapsed: Optional[int] = None) -> None:
     channel = bot.get_channel(RECORD_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
+        await send_log("❌ 기록 전송 실패: RECORD_CHANNEL_ID 채널을 찾지 못했습니다.")
         return
 
-    embed = build_clock_embed(is_clock_in, member, ts, elapsed)
-    await channel.send(embed=embed)
+    try:
+        embed = build_clock_embed(is_clock_in, member, ts, elapsed)
+        await channel.send(embed=embed)
+    except Exception as e:
+        error_text = traceback.format_exc()
+        await send_log(
+            f"❌ 기록 전송 오류: {type(e).__name__} / {e}\n```py\n{error_text[:1500]}\n```"
+        )
 
 
 # =========================
@@ -470,7 +536,7 @@ class AttendanceView(discord.ui.View):
 
         await send_record_log(True, member, ts)
         await refresh_status_message(interaction.guild)
-        await send_log(f"✅ 출근 완료: {member} ({member.id})")
+        await send_log(f"✅ 출근 완료: {member_log_name(member)}")
         await interaction.response.send_message("출근 처리되었습니다.", ephemeral=True)
 
     @discord.ui.button(label="퇴근", style=discord.ButtonStyle.danger, custom_id="raon_clock_out")
@@ -495,7 +561,7 @@ class AttendanceView(discord.ui.View):
                 save_data(attendance_data)
                 await interaction.response.send_message("데이터가 꼬여 근무상태만 해제했습니다.", ephemeral=True)
                 await refresh_status_message(interaction.guild)
-                await send_log(f"⚠️ 퇴근 오류 복구: {member} ({member.id})")
+                await send_log(f"⚠️ 퇴근 오류 복구: {member_log_name(member)}")
                 return
 
             ts = now_ts()
@@ -509,7 +575,7 @@ class AttendanceView(discord.ui.View):
 
         await send_record_log(False, member, ts, elapsed)
         await refresh_status_message(interaction.guild)
-        await send_log(f"✅ 퇴근 완료: {member} ({member.id}) / +{format_seconds(elapsed)}")
+        await send_log(f"✅ 퇴근 완료: {member_log_name(member)} / +{format_seconds(elapsed)}")
         await interaction.response.send_message(
             f"퇴근 처리되었습니다. 이번 근무시간: {format_seconds(elapsed)}",
             ephemeral=True
@@ -551,7 +617,7 @@ class StatusView(discord.ui.View):
 
         await rebuild_messages(interaction.guild)
         await refresh_status_message(interaction.guild)
-        await send_log(f"🛠️ 복구 실행: {interaction.user} ({interaction.user.id}) / 상태수정 {fixed}건")
+        await send_log(f"🛠️ 복구 실행: {member_log_name(interaction.user)} / 상태수정 {fixed}건")
         await interaction.response.send_message("복구 완료되었습니다.", ephemeral=True)
 
     @discord.ui.button(label="중복삭제", style=discord.ButtonStyle.secondary, custom_id="raon_status_cleanup")
@@ -571,7 +637,7 @@ class StatusView(discord.ui.View):
 
         await refresh_status_message(interaction.guild)
         await send_log(
-            f"🧹 중복삭제 실행: {interaction.user} ({interaction.user.id}) / 중복병합 {merged}건 / 상태수정 {fixed}건"
+            f"🧹 중복삭제 실행: {member_log_name(interaction.user)} / 중복병합 {merged}건 / 상태수정 {fixed}건"
         )
         await interaction.response.send_message(
             f"중복삭제 완료: 병합 {merged}건 / 상태수정 {fixed}건",
@@ -598,7 +664,7 @@ async def force_clock_out_command(ctx: commands.Context, member: Optional[discor
         save_data(attendance_data)
 
     await refresh_status_message(ctx.guild)
-    await send_log(f"🛑 강제퇴근: {ctx.author} -> {member} / {msg}")
+    await send_log(f"🛑 강제퇴근: {member_log_name(ctx.author)} -> {member_log_name(member)} / {msg}")
     await ctx.reply(f"{member.mention} {msg}")
 
 
@@ -628,7 +694,7 @@ async def rebuild_command(ctx: commands.Context):
 
     await rebuild_messages(ctx.guild)
     await refresh_status_message(ctx.guild)
-    await send_log(f"🛠️ 명령어 복구 실행: {ctx.author} ({ctx.author.id}) / 상태수정 {fixed}건")
+    await send_log(f"🛠️ 명령어 복구 실행: {member_log_name(ctx.author)} / 상태수정 {fixed}건")
     await ctx.reply("복구 완료되었습니다.")
 
 
@@ -645,7 +711,7 @@ async def cleanup_command(ctx: commands.Context):
         save_data(attendance_data)
 
     await refresh_status_message(ctx.guild)
-    await send_log(f"🧹 명령어 중복삭제 실행: {ctx.author} ({ctx.author.id}) / 병합 {merged}건 / 상태수정 {fixed}건")
+    await send_log(f"🧹 명령어 중복삭제 실행: {member_log_name(ctx.author)} / 병합 {merged}건 / 상태수정 {fixed}건")
     await ctx.reply(f"중복삭제 완료: 병합 {merged}건 / 상태수정 {fixed}건")
 
 
@@ -667,8 +733,49 @@ async def reset_working_command(ctx: commands.Context):
         save_data(attendance_data)
 
     await refresh_status_message(ctx.guild)
-    await send_log(f"🚨 근무초기화 실행: {ctx.author} ({ctx.author.id}) / {count}명 해제")
+    await send_log(f"🚨 근무초기화 실행: {member_log_name(ctx.author)} / {count}명 해제")
     await ctx.reply(f"현재 근무중 상태 {count}명을 해제했습니다.")
+
+
+@bot.command(name="삭제")
+@commands.guild_only()
+async def delete_time_command(ctx: commands.Context, nickname: Optional[str] = None, amount: Optional[str] = None):
+    if not isinstance(ctx.author, discord.Member) or not is_admin(ctx.author):
+        await ctx.reply("관리자만 사용할 수 있습니다.")
+        return
+
+    if not nickname or not amount:
+        await ctx.reply("사용법: `!삭제 우진 1시간` 또는 `!삭제 볶음 30분`")
+        return
+
+    seconds = parse_time_to_seconds(amount)
+    if seconds is None:
+        await ctx.reply("시간 형식이 올바르지 않습니다. 예: `1시간`, `30분`, `45초`")
+        return
+
+    async with data_lock:
+        found = find_user_by_display_name(nickname)
+        if not found:
+            await ctx.reply(f"`{nickname}` 닉네임을 찾지 못했습니다.")
+            return
+
+        uid, user = found
+        before = int(user.get("total_time", 0))
+        user["total_time"] = max(0, before - seconds)
+        after = int(user["total_time"])
+        save_data(attendance_data)
+
+    await refresh_status_message(ctx.guild)
+    await send_log(
+        f"➖ 시간차감: {member_log_name(ctx.author)} / "
+        f"{user.get('display_name', uid)} / 차감 {format_seconds(seconds)} / "
+        f"변경 {format_seconds(before)} -> {format_seconds(after)}"
+    )
+    await ctx.reply(
+        f"{user.get('display_name', uid)} 시간 차감 완료\n"
+        f"- 차감: {format_seconds(seconds)}\n"
+        f"- 변경 후: {format_seconds(after)}"
+    )
 
 
 # =========================
@@ -709,11 +816,22 @@ async def on_command_error(ctx: commands.Context, error: Exception):
     if isinstance(error, commands.CommandNotFound):
         return
 
-    await send_log(f"❌ 명령어 오류: {type(error).__name__} / {error}")
+    error_text = traceback.format_exc()
+    await send_log(
+        f"❌ 명령어 오류: {type(error).__name__} / {error}\n```py\n{error_text[:1500]}\n```"
+    )
     try:
-        await ctx.reply(f"오류가 발생했습니다: {error}")
+        await ctx.reply(f"오류가 발생했습니다: {type(error).__name__} / {error}")
     except Exception:
         pass
+
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    error_text = traceback.format_exc()
+    await send_log(
+        f"❌ 이벤트 오류: {event}\n```py\n{error_text[:1500]}\n```"
+    )
 
 
 # =========================
@@ -728,7 +846,10 @@ async def auto_status_updater():
     try:
         await refresh_status_message(guild)
     except Exception as e:
-        await send_log(f"❌ 자동 현황갱신 오류: {e}")
+        error_text = traceback.format_exc()
+        await send_log(
+            f"❌ 자동 현황갱신 오류: {type(e).__name__} / {e}\n```py\n{error_text[:1500]}\n```"
+        )
 
 
 @auto_status_updater.before_loop
