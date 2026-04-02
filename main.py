@@ -290,6 +290,33 @@ def remove_user_by_display_name(name: str) -> Optional[Tuple[str, Dict[str, Any]
     return uid, removed
 
 
+def add_or_update_staff_by_name(nickname: str, role_label: str) -> Tuple[str, Dict[str, Any], bool]:
+    found = find_user_by_display_name(nickname)
+    display_name = f"{role_label}ᆞ{nickname}"
+
+    if found:
+        uid, user = found
+        user["display_name"] = display_name
+        return uid, user, False
+
+    uid = make_manual_user_key(nickname)
+    attendance_data["users"][uid] = {
+        "user_id": uid,
+        "display_name": display_name,
+        "total_time": 0,
+        "is_working": False,
+        "last_clock_in": None
+    }
+    return uid, attendance_data["users"][uid], True
+
+
+def add_or_update_working_staff_by_name(nickname: str, role_label: str) -> Tuple[str, Dict[str, Any], bool]:
+    uid, user, created = add_or_update_staff_by_name(nickname, role_label)
+    user["is_working"] = True
+    user["last_clock_in"] = now_ts()
+    return uid, user, created
+
+
 async def send_log(message: str) -> None:
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
@@ -539,26 +566,6 @@ def force_clock_out_user(member: discord.Member) -> Tuple[bool, str]:
     return True, f"강제퇴근 완료 (+{format_seconds(elapsed)})"
 
 
-def add_or_update_staff_by_name(nickname: str, role_label: str) -> Tuple[str, Dict[str, Any], bool]:
-    found = find_user_by_display_name(nickname)
-    display_name = f"{role_label}ᆞ{nickname}"
-
-    if found:
-        uid, user = found
-        user["display_name"] = display_name
-        return uid, user, False
-
-    uid = make_manual_user_key(nickname)
-    attendance_data["users"][uid] = {
-        "user_id": uid,
-        "display_name": display_name,
-        "total_time": 0,
-        "is_working": False,
-        "last_clock_in": None
-    }
-    return uid, attendance_data["users"][uid], True
-
-
 # =========================
 # 기록 전송
 # =========================
@@ -750,6 +757,40 @@ async def slash_add_staff(interaction: discord.Interaction, nickname: str, role:
     )
     await interaction.response.send_message(
         f"{user.get('display_name', uid)} 등록 완료",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="출근추가", description="사람을 추가하고 바로 현재 근무중으로 넣습니다", guild=GUILD_OBJ)
+@app_commands.describe(nickname="닉네임", role="직급 예: STAFF, AM, 뉴비도우미, GM, DGM, IG, DEV")
+async def slash_add_working_staff(interaction: discord.Interaction, nickname: str, role: str):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("서버 안에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    role_label = normalize_role_label(role)
+    if not role_label:
+        await interaction.response.send_message(
+            "직급이 올바르지 않습니다. 사용 가능: STAFF, AM, 뉴비도우미, GM, DGM, IG, DEV",
+            ephemeral=True
+        )
+        return
+
+    async with data_lock:
+        uid, user, created = add_or_update_working_staff_by_name(nickname, role_label)
+        save_data(attendance_data)
+
+    await refresh_status_message(interaction.guild)
+    await send_log(
+        f"🟢 출근추가: {member_log_name(interaction.user)} / "
+        f"{user.get('display_name', uid)} / {'신규추가' if created else '기존유저 출근처리'}"
+    )
+    await interaction.response.send_message(
+        f"{user.get('display_name', uid)} 현재 근무중으로 추가 완료",
         ephemeral=True
     )
 
